@@ -1,7 +1,9 @@
 import { Link } from "@tanstack/react-router";
 import { Search, ShoppingBag, User, Menu } from "lucide-react";
+import { useCart } from "@/context/CartContext";
 
 export function Header() {
+  const { count, open } = useCart();
   return (
     <header className="sticky top-0 z-50 bg-background/90 backdrop-blur-md border-b border-border">
       <div className="container-edge flex items-center justify-between h-16 md:h-20">
@@ -35,10 +37,18 @@ export function Header() {
           <button aria-label="Account" className="p-2 hover:text-[var(--gold)] transition-colors hidden md:inline-flex">
             <User className="w-[18px] h-[18px]" strokeWidth={1.4} />
           </button>
-          <button aria-label="Cart" className="p-2 hover:text-[var(--gold)] transition-colors relative">
+          <button
+            onClick={open}
+            aria-label={`Cart, ${count} items`}
+            className="p-2 hover:text-[var(--gold)] transition-colors relative"
+          >
             <ShoppingBag className="w-[18px] h-[18px]" strokeWidth={1.4} />
-            <span className="absolute -top-0.5 -right-0.5 w-4 h-4 text-[10px] flex items-center justify-center bg-[var(--ink)] text-[var(--paper)] font-mono">
-              0
+            <span
+              className={`absolute -top-0.5 -right-0.5 w-4 h-4 text-[10px] flex items-center justify-center font-mono transition-colors ${
+                count > 0 ? "bg-[var(--gold)] text-[var(--ink)]" : "bg-[var(--ink)] text-[var(--paper)]"
+              }`}
+            >
+              {count}
             </span>
           </button>
         </div>

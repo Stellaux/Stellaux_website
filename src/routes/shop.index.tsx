@@ -1,5 +1,7 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { fallback, zodValidator } from "@tanstack/zod-adapter";
 import { useMemo, useState } from "react";
+import { z } from "zod";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
 import { ProductCard } from "@/components/ProductCard";
@@ -25,7 +27,21 @@ const PRICE_RANGES = [
 
 const PAGE_SIZE = 8;
 
+const categoryEnum = z.enum(["all", "rings", "necklaces", "earrings", "bracelets"]);
+const sortEnum = z.enum(["newest", "price-asc", "price-desc", "popularity"]);
+const priceEnum = z.enum(["all", "u250", "250-500", "500-1000", "o1000"]);
+const materialEnum = z.enum(["18k Gold", "Gold Vermeil", "Sterling Silver", "Platinum"]);
+
+const shopSearchSchema = z.object({
+  category: fallback(categoryEnum, "all").default("all"),
+  sort: fallback(sortEnum, "newest").default("newest"),
+  price: fallback(priceEnum, "all").default("all"),
+  materials: fallback(z.array(materialEnum), []).default([]),
+  page: fallback(z.number().int().min(1).max(20), 1).default(1),
+});
+
 export const Route = createFileRoute("/shop/")({
+  validateSearch: zodValidator(shopSearchSchema),
   head: () => ({
     meta: [
       { title: "The Collection — Maison Auré" },
@@ -38,18 +54,25 @@ export const Route = createFileRoute("/shop/")({
 });
 
 function ShopPage() {
-  const [category, setCategory] = useState<Category | "all">("all");
-  const [materials, setMaterials] = useState<Material[]>([]);
-  const [priceKey, setPriceKey] = useState("all");
-  const [sort, setSort] = useState<SortKey>("newest");
-  const [visible, setVisible] = useState(PAGE_SIZE);
+  const search = Route.useSearch();
+  const navigate = useNavigate({ from: "/shop/" });
   const [filtersOpen, setFiltersOpen] = useState(false);
+
+  const { category, sort, price: priceKey, materials, page } = search;
+  const visible = page * PAGE_SIZE;
+
+  const update = (patch: Partial<typeof search>, resetPage = true) => {
+    navigate({
+      search: (prev: typeof search) => ({ ...prev, ...patch, ...(resetPage ? { page: 1 } : {}) }),
+      replace: true,
+    });
+  };
 
   const filtered = useMemo(() => {
     const range = PRICE_RANGES.find((r) => r.key === priceKey)!;
     let list = products.filter((p) => {
       if (category !== "all" && p.category !== category) return false;
-      if (materials.length && !materials.includes(p.material)) return false;
+      if (materials.length && !materials.includes(p.material as Material)) return false;
       if (p.price < range.min || p.price > range.max) return false;
       return true;
     });
@@ -69,12 +92,12 @@ function ShopPage() {
   const hasMore = filtered.length > visible;
 
   const toggleMaterial = (m: Material) => {
-    setMaterials((prev) => (prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m]));
-    setVisible(PAGE_SIZE);
+    const next = materials.includes(m) ? materials.filter((x: Material) => x !== m) : [...materials, m];
+    update({ materials: next });
   };
 
   const reset = () => {
-    setCategory("all"); setMaterials([]); setPriceKey("all"); setVisible(PAGE_SIZE);
+    navigate({ search: { category: "all", sort: "newest", price: "all", materials: [], page: 1 }, replace: true });
   };
 
   const activeCount = (category !== "all" ? 1 : 0) + materials.length + (priceKey !== "all" ? 1 : 0);
@@ -106,7 +129,7 @@ function ShopPage() {
               {CATEGORIES.map((c) => (
                 <button
                   key={c.key}
-                  onClick={() => { setCategory(c.key); setVisible(PAGE_SIZE); }}
+                  onClick={() => update({ category: c.key as Category | "all" })}
                   className={`spec text-[11px] py-1 border-b transition-colors whitespace-nowrap ${
                     category === c.key ? "border-[var(--ink)] text-[var(--ink)]" : "border-transparent text-muted-foreground hover:text-[var(--ink)]"
                   }`}
@@ -123,7 +146,7 @@ function ShopPage() {
                 <SlidersHorizontal className="w-3.5 h-3.5" />
                 Filters {activeCount > 0 && <span className="text-[var(--gold)]">· {activeCount}</span>}
               </button>
-              <SortMenu sort={sort} onChange={(s) => { setSort(s); setVisible(PAGE_SIZE); }} />
+              <SortMenu sort={sort} onChange={(s) => update({ sort: s })} />
             </div>
           </div>
         </div>
@@ -137,7 +160,7 @@ function ShopPage() {
                   materials={materials}
                   toggleMaterial={toggleMaterial}
                   priceKey={priceKey}
-                  setPriceKey={(k) => { setPriceKey(k); setVisible(PAGE_SIZE); }}
+                  setPriceKey={(k) => update({ price: k as typeof priceKey })}
                   reset={reset}
                   activeCount={activeCount}
                 />
@@ -163,7 +186,10 @@ function ShopPage() {
                       Showing {shown.length} of {filtered.length}
                     </span>
                     {hasMore ? (
-                      <button onClick={() => setVisible((v) => v + PAGE_SIZE)} className="btn-ghost">
+                      <button
+                        onClick={() => update({ page: page + 1 }, false)}
+                        className="btn-ghost"
+                      >
                         <span>Load more</span>
                         <span aria-hidden>↓</span>
                       </button>
@@ -190,7 +216,7 @@ function ShopPage() {
                 materials={materials}
                 toggleMaterial={toggleMaterial}
                 priceKey={priceKey}
-                setPriceKey={(k) => { setPriceKey(k); setVisible(PAGE_SIZE); }}
+                setPriceKey={(k) => update({ price: k as typeof priceKey })}
                 reset={reset}
                 activeCount={activeCount}
               />
