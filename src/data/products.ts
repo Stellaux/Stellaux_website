@@ -40,7 +40,12 @@ const seed: Omit<Product, "id" | "slug" | "images">[] = [
 ];
 
 export const products: Product[] = seed.map((p, i) => {
-  const slug = p.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const slug = p.name
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
   const cover = IMG[i % IMG.length];
   const images = [cover, IMG[(i + 1) % IMG.length], IMG[(i + 2) % IMG.length], IMG[(i + 3) % IMG.length]];
   return { id: String(i + 1).padStart(3, "0"), slug, images, ...p };
