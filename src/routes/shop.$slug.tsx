@@ -5,6 +5,7 @@ import { Footer } from "@/components/Footer";
 import { ProductCard } from "@/components/ProductCard";
 import { getProductBySlug, relatedProducts, type Product } from "@/data/products";
 import { ChevronDown, ChevronLeft, ChevronRight, Heart, Minus, Plus } from "lucide-react";
+import { useCart } from "@/context/CartContext";
 
 const RING_SIZES = ["5", "6", "7", "8", "9", "10"];
 
@@ -76,6 +77,25 @@ function ProductHero({ product }: { product: Product }) {
   const [size, setSize] = useState<string | null>(product.category === "rings" ? "7" : null);
   const [qty, setQty] = useState(1);
   const [zoom, setZoom] = useState({ on: false, x: 50, y: 50 });
+  const { addItem } = useCart();
+
+  const needsSize = product.category === "rings";
+  const canAdd = !needsSize || !!size;
+
+  const handleAdd = () => {
+    if (!canAdd) return;
+    addItem({
+      productId: product.id,
+      slug: product.slug,
+      name: product.name,
+      image: product.images[0],
+      price: product.price,
+      size,
+      qty,
+      spec: product.spec,
+      material: product.material,
+    });
+  };
 
   const next = () => setActive((i) => (i + 1) % product.images.length);
   const prev = () => setActive((i) => (i - 1 + product.images.length) % product.images.length);
@@ -205,8 +225,13 @@ function ProductHero({ product }: { product: Product }) {
             </div>
 
             <div className="mt-8 flex items-stretch gap-3">
-              <button className="btn-solid flex-1 justify-center" style={{ borderColor: "var(--gold)" }}>
-                <span>Add to cart · ${product.price * qty}</span>
+              <button
+                onClick={handleAdd}
+                disabled={!canAdd}
+                className="btn-solid flex-1 justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ borderColor: "var(--gold)" }}
+              >
+                <span>{canAdd ? `Add to cart · $${(product.price * qty).toLocaleString()}` : "Select a size"}</span>
               </button>
               <button aria-label="Save" className="border border-[var(--ink)] w-12 flex items-center justify-center hover:bg-[var(--ink)] hover:text-[var(--paper)] transition-colors">
                 <Heart className="w-4 h-4" strokeWidth={1.4} />
