@@ -63,7 +63,7 @@ function ShopPage() {
 
   const update = (patch: Partial<typeof search>, resetPage = true) => {
     navigate({
-      search: (prev) => ({ ...prev, ...patch, ...(resetPage ? { page: 1 } : {}) }),
+      search: (prev: typeof search) => ({ ...prev, ...patch, ...(resetPage ? { page: 1 } : {}) }),
       replace: true,
     });
   };
@@ -92,7 +92,7 @@ function ShopPage() {
   const hasMore = filtered.length > visible;
 
   const toggleMaterial = (m: Material) => {
-    const next = materials.includes(m) ? materials.filter((x) => x !== m) : [...materials, m];
+    const next = materials.includes(m) ? materials.filter((x: Material) => x !== m) : [...materials, m];
     update({ materials: next });
   };
 
