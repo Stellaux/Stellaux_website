@@ -10,7 +10,7 @@ export function Header() {
         </button>
 
         <nav className="hidden md:flex items-center gap-10">
-          <Link to="/" className="nav-link">Shop</Link>
+          <Link to="/shop" className="nav-link">Shop</Link>
           <a href="#craft" className="nav-link">Craft</a>
           <a href="#journal" className="nav-link">Journal</a>
           <span
