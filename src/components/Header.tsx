@@ -13,7 +13,7 @@ export function Header() {
 
         <nav className="hidden md:flex items-center gap-10">
           <Link to="/shop" className="nav-link">Shop</Link>
-          <a href="#craft" className="nav-link">Craft</a>
+          <Link to="/craft" className="nav-link">Craft</Link>
           <a href="#journal" className="nav-link">Journal</a>
           <span
             className="nav-link opacity-40 cursor-not-allowed"
@@ -34,9 +34,9 @@ export function Header() {
           <button aria-label="Search" className="p-2 hover:text-[var(--gold)] transition-colors">
             <Search className="w-[18px] h-[18px]" strokeWidth={1.4} />
           </button>
-          <button aria-label="Account" className="p-2 hover:text-[var(--gold)] transition-colors hidden md:inline-flex">
+          <Link to="/account" aria-label="Account" className="p-2 hover:text-[var(--gold)] transition-colors hidden md:inline-flex">
             <User className="w-[18px] h-[18px]" strokeWidth={1.4} />
-          </button>
+          </Link>
           <button
             onClick={open}
             aria-label={`Cart, ${count} items`}
