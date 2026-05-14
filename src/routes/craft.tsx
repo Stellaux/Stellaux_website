@@ -164,7 +164,7 @@ function CraftPage() {
                       <Check className="w-3 h-3" strokeWidth={2.4} />
                     </span>
                   )}
-                  <Icon className="w-7 h-7 mb-6" strokeWidth={1.2} />
+                  <Icon className="w-7 h-7 mb-6" />
                   <div className="font-serif text-3xl mb-1">{title}</div>
                   <p className="spec text-[10px] text-muted-foreground">{desc}</p>
                 </button>
