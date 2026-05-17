@@ -1,0 +1,89 @@
+# Local dev orchestration.
+#
+# Full stack:
+#   docker compose up --build
+#
+# Detached:
+#   docker compose up -d --build
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: stellaux-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: stellaux
+      POSTGRES_PASSWORD: stellaux_dev_only
+      POSTGRES_DB: stellaux
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stellaux -d stellaux"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    container_name: stellaux-server
+    build:
+      context: ./stellaux_server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://stellaux:stellaux_dev_only@postgres:5432/stellaux
+      DATABASE_POOL_SIZE: "10"
+      RUST_LOG: ${RUST_LOG:-info,stellaux_server=debug}
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: "8080"
+      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-do-not-use-in-prod}
+      JWT_EXPIRY_SECONDS: "3600"
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:3000}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_SUCCESS_URL: ${STRIPE_SUCCESS_URL:-http://localhost:5173/order-confirmed}
+      STRIPE_CANCEL_URL: ${STRIPE_CANCEL_URL:-http://localhost:5173/checkout}
+      SHIPPO_API_TOKEN: ${SHIPPO_API_TOKEN:-}
+      SHIPPO_WEBHOOK_SECRET: ${SHIPPO_WEBHOOK_SECRET:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-orders@example.com}
+      WAREHOUSE_NAME: ${WAREHOUSE_NAME:-}
+      WAREHOUSE_STREET: ${WAREHOUSE_STREET:-}
+      WAREHOUSE_CITY: ${WAREHOUSE_CITY:-}
+      WAREHOUSE_STATE: ${WAREHOUSE_STATE:-}
+      WAREHOUSE_POSTAL_CODE: ${WAREHOUSE_POSTAL_CODE:-}
+      WAREHOUSE_COUNTRY: ${WAREHOUSE_COUNTRY:-US}
+      WAREHOUSE_PHONE: ${WAREHOUSE_PHONE:-}
+    ports:
+      - "8080:8080"
+
+  client:
+    container_name: stellaux-client
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_started
+    working_dir: /app
+    env_file:
+      - ./client/.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+    command: npm run dev -- --host 0.0.0.0 --port 3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./client:/app
+      - client_node_modules:/app/node_modules
+
+volumes:
+  postgres_data:
+    name: stellaux_postgres_data
+  client_node_modules:

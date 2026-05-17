@@ -1,0 +1,187 @@
+name: Backend CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/backend-ci.yml"
+      - ".github/dependabot.yml"
+      - "docker-compose.yml"
+      - "docs/CI/CD_Pipeline.md"
+      - "migration/**"
+      - "stellaux_server/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/backend-ci.yml"
+      - ".github/dependabot.yml"
+      - "docker-compose.yml"
+      - "docs/CI/CD_Pipeline.md"
+      - "migration/**"
+      - "stellaux_server/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pull-request-checks:
+    name: Pull Request Checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: stellaux_server
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            stellaux_server -> target
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint with Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Verify compilation
+        run: cargo check --all-targets
+
+      - name: Run unit tests
+        run: cargo test --lib
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: pull-request-checks
+    defaults:
+      run:
+        working-directory: stellaux_server
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: stellaux
+          POSTGRES_PASSWORD: stellaux_ci_only
+          POSTGRES_DB: stellaux_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U stellaux -d stellaux_ci"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      APP_ENV: ci
+      DATABASE_URL: postgres://stellaux:stellaux_ci_only@localhost:5432/stellaux_ci
+      DATABASE_POOL_SIZE: "5"
+      JWT_SECRET: ci-jwt-secret-not-for-production
+      JWT_EXPIRY_SECONDS: "3600"
+      CORS_ORIGINS: http://localhost:3000
+      STRIPE_SECRET_KEY: ""
+      STRIPE_WEBHOOK_SECRET: ""
+      STRIPE_SUCCESS_URL: http://localhost:3000/order-confirmed
+      STRIPE_CANCEL_URL: http://localhost:3000/checkout
+      SHIPPO_API_TOKEN: ""
+      SHIPPO_WEBHOOK_SECRET: ""
+      RESEND_API_KEY: ""
+      RESEND_FROM_EMAIL: ci@example.com
+      WAREHOUSE_COUNTRY: US
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            stellaux_server -> target
+
+      - name: Wait for PostgreSQL
+        run: |
+          for _ in $(seq 1 30); do
+            if nc -z 127.0.0.1 5432; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "PostgreSQL did not become ready in time" >&2
+          exit 1
+
+      - name: Run integration test target(s)
+        run: cargo test --tests -- --nocapture
+
+  database-and-security:
+    name: Database and Security
+    runs-on: ubuntu-latest
+    needs: pull-request-checks
+    defaults:
+      run:
+        working-directory: stellaux_server
+    env:
+      SQLX_OFFLINE: "true"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            stellaux_server -> target
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Scan dependencies for known vulnerabilities
+        run: cargo audit
+
+      - name: Install cargo-outdated
+        run: cargo install cargo-outdated --locked
+
+      - name: Report outdated Rust dependencies
+        continue-on-error: true
+        run: cargo outdated --root-deps-only
+
+      - name: Check spelling in code comments and docs
+        uses: crate-ci/typos@v1.31.1
+        with:
+          files: |
+            .github
+            docs
+            stellaux_server
+
+      - name: Install sqlx-cli
+        if: ${{ hashFiles('stellaux_server/.sqlx/**') != '' }}
+        run: cargo install sqlx-cli --no-default-features --features rustls,postgres --locked
+
+      - name: Verify SQLx offline metadata
+        if: ${{ hashFiles('stellaux_server/.sqlx/**') != '' }}
+        run: cargo sqlx prepare --check
+
+      - name: Note SQLx offline check is deferred
+        if: ${{ hashFiles('stellaux_server/.sqlx/**') == '' }}
+        run: |
+          echo "::notice title=SQLx offline metadata not present::Add stellaux_server/.sqlx metadata to enforce cargo sqlx prepare --check in CI."
