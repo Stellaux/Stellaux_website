@@ -1,0 +1,17 @@
+target/
+**/target/
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+.DS_Store
+Dockerfile
+.dockerignore
+docker-compose*.yml
+*.md
+.env
+.env.*
+!.env.example
+node_modules/
