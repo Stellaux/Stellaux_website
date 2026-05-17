@@ -1,0 +1,43 @@
+create table private.inventory {
+    id uuid primary key default gen_random_uuid(),
+    product_id uuid not null references public.products(id),
+    variant_id uuid not null references public.product_variant(id),
+    quantity int not null default 0,
+    reserved int not null default 0,
+
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+}
+
+create table private.inventory_adjustment {
+    id uuid primary key default gen_random_uuid(),
+    inventory_id uuid not null references private.inventory(id),
+    channel text not null, -- 'website' | 'etsy' | 'ebay' | null
+    change int not null,
+    reason text not null,
+
+    actor_user_id uuid not null,
+    notes text,
+    created_at timestamptz not null default now()
+}
+
+create table private.inventory_log {
+    id uuid primary key default gen_random_uuid(),
+    inventory_id uuid not null references private.inventory(id),
+    change inventory_adjustment,
+    reason text not null,
+
+    created_at timestamptz not null default now()
+}
+
+create table private.inventory_alert {
+    id uuid primary key default gen_random_uuid(),
+    inventory_id uuid not null references private.inventory(id),
+    quantity int not null,
+    reason text not null,
+
+    created_at timestamptz not null default now()
+}
+
+
+
