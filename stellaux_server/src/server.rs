@@ -30,6 +30,7 @@ use tower_http::{
     limit::RequestBodyLimitLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     sensitive_headers::SetSensitiveRequestHeadersLayer,
+    services::ServeDir,
     set_header::SetResponseHeaderLayer,
     trace::TraceLayer,
 };
@@ -37,6 +38,7 @@ use tower_http::{
 use crate::common::{
     app_state::AppState,
     auth::{require_admin, require_auth},
+    config::StorageBackend,
     error::AppResult,
 };
 
@@ -72,6 +74,8 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
 fn build_router(state: AppState) -> Router {
     let (prom_layer, prom_handle) = PrometheusMetricLayer::pair();
     let metrics_handle = prom_handle.clone();
+    // Recorder is installed by ::pair() — safe to register descriptions now.
+    crate::common::metrics::install_descriptions();
 
     let timeout = Duration::from_secs(state.config.server.request_timeout_secs);
     let body_limit = state.config.server.body_limit_bytes;
@@ -79,7 +83,7 @@ fn build_router(state: AppState) -> Router {
     let in_prod = state.config.server.is_prod();
 
     // ── Public: no auth, standard body limit ─────────────────────────────
-    let public: Router<AppState> = Router::new()
+    let mut public: Router<AppState> = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route(
@@ -91,8 +95,18 @@ fn build_router(state: AppState) -> Router {
         )
         .nest("/api/v1/catalog", crate::domain::catalog::routes())
         .nest("/api/v1/craft", crate::domain::craft::routes())
-        .nest("/api/v1/auth", crate::domain::auth::routes())
-        .layer(RequestBodyLimitLayer::new(body_limit));
+        .nest("/api/v1/auth", crate::domain::auth::routes());
+
+    // Local backend: serve uploaded assets from this server. S3/R2 backends
+    // resolve via the bucket's public URL, so no route is mounted.
+    if state.config.storage.backend == StorageBackend::Local {
+        public = public.nest_service(
+            "/storage",
+            ServeDir::new(&state.config.storage.local_path),
+        );
+    }
+
+    let public = public.layer(RequestBodyLimitLayer::new(body_limit));
 
     // ── Webhooks: no auth (handler verifies signature), large body limit ─
     let webhooks: Router<AppState> = Router::new()

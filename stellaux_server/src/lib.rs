@@ -5,4 +5,6 @@
 
 pub mod common;
 pub mod domain;
+pub mod entity;
+pub mod migration;
 pub mod server;

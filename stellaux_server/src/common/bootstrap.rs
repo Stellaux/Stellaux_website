@@ -14,11 +14,15 @@ use anyhow::Context;
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+use sea_orm_migration::MigratorTrait;
+
 use crate::common::{
     app_state::AppState,
     config::{Config, DatabaseConfig},
     jwt::JwksCache,
+    storage,
 };
+use crate::migration::Migrator;
 
 pub async fn init() -> anyhow::Result<AppState> {
     init_tracing();
@@ -31,7 +35,23 @@ pub async fn init() -> anyhow::Result<AppState> {
     let db = connect_db(&config.database)
         .await
         .context("connecting to database")?;
+
+    // Apply any pending sea-orm migrations before the server accepts traffic.
+    // sea-orm-migration tracks state in `seaql_migrations`, so this is a no-op
+    // when nothing is pending.
+    Migrator::up(&db, None)
+        .await
+        .context("applying database migrations")?;
+    tracing::info!("migrations up-to-date");
+
     let http = build_http_client().context("building http client")?;
+
+    let storage = storage::build(&config.storage).context("initializing storage")?;
+    tracing::info!(
+        backend = ?config.storage.backend,
+        public_url = %config.storage.public_base_url,
+        "storage ready"
+    );
 
     let jwks = match config.auth.supabase_jwks_url.as_ref() {
         Some(url) => {
@@ -63,23 +83,44 @@ pub async fn init() -> anyhow::Result<AppState> {
         db,
         config: Arc::new(config),
         http,
+        storage,
         jwks,
     })
 }
 
 fn init_tracing() {
+    // APP_ENV is read directly here (Config isn't loaded yet — tracing must
+    // come first so subsequent steps can emit logs).
+    let env = std::env::var("APP_ENV").unwrap_or_else(|_| "dev".into());
+    let is_prod =
+        env.eq_ignore_ascii_case("prod") || env.eq_ignore_ascii_case("production");
+
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let registry = tracing_subscriber::registry().with(env_filter);
 
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_target(true)
-        .with_thread_ids(false)
-        .with_line_number(false)
-        .with_ansi(std::io::stdout().is_terminal());
-
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt_layer)
-        .init();
+    if is_prod {
+        // Structured JSON — one log object per line, ready for Loki/CloudWatch/etc.
+        registry
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_target(true)
+                    .with_current_span(true)
+                    .with_span_list(false),
+            )
+            .init();
+    } else {
+        // Human-readable with optional ANSI when attached to a TTY.
+        registry
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(true)
+                    .with_thread_ids(false)
+                    .with_line_number(false)
+                    .with_ansi(std::io::stdout().is_terminal()),
+            )
+            .init();
+    }
 }
 
 async fn connect_db(cfg: &DatabaseConfig) -> anyhow::Result<DatabaseConnection> {

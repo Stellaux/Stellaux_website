@@ -8,13 +8,14 @@ use std::sync::Arc;
 
 use sea_orm::DatabaseConnection;
 
-use crate::common::{config::Config, jwt::JwksCache};
+use crate::common::{config::Config, jwt::JwksCache, storage::Storage};
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: DatabaseConnection,
     pub config: Arc<Config>,
     pub http: reqwest::Client,
+    pub storage: Storage,
     /// Present iff `SUPABASE_JWKS_URL` is configured. `None` means Supabase
     /// JWT verification is disabled; routes behind `require_supabase_auth`
     /// will return 500 if hit.

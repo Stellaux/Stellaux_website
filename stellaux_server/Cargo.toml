@@ -24,8 +24,14 @@ tower-http = { version = "0.6", features = [
   "sensitive-headers",
   "set-header",
   "catch-panic",
+  "fs",
 ] }
 axum-prometheus = "0.7"
+metrics = "0.23"
+
+# Storage abstraction — local filesystem in dev, S3/R2/MinIO in prod.
+# `aws` feature enables S3-compatible backends.
+object_store = { version = "0.11", features = ["aws"] }
 
 # ─── Database: sea-orm (built on sqlx, async + rustls, no libpq) ──────────
 sea-orm = { version = "1.1", default-features = false, features = [

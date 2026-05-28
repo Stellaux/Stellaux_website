@@ -11,10 +11,41 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub auth: AuthConfig,
     pub cors: CorsConfig,
+    pub storage: StorageConfig,
     pub stripe: StripeConfig,
     pub shippo: ShippoConfig,
     pub resend: ResendConfig,
     pub warehouse: WarehouseConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageBackend {
+    Local,
+    S3,
+}
+
+impl StorageBackend {
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "s3" | "r2" | "minio" => StorageBackend::S3,
+            _ => StorageBackend::Local,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StorageConfig {
+    pub backend: StorageBackend,
+    /// Base URL clients hit to fetch stored assets.
+    /// Local: `http://localhost:8080/storage` (served by this server)
+    /// R2:    `https://cdn.themaisonaure.com` (CDN in front of bucket)
+    pub public_base_url: String,
+    pub local_path: String,
+    pub s3_bucket: Option<String>,
+    pub s3_endpoint: Option<String>,
+    pub s3_region: String,
+    pub s3_access_key_id: Option<String>,
+    pub s3_secret_access_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +157,23 @@ impl Config {
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect(),
+            },
+            storage: StorageConfig {
+                backend: StorageBackend::parse(&env_or("STORAGE_BACKEND", "local")),
+                public_base_url: env_or(
+                    "STORAGE_PUBLIC_URL",
+                    "http://localhost:8080/storage",
+                ),
+                local_path: env_or("STORAGE_LOCAL_PATH", "./storage"),
+                s3_bucket: env::var("STORAGE_S3_BUCKET").ok().filter(|s| !s.is_empty()),
+                s3_endpoint: env::var("STORAGE_S3_ENDPOINT").ok().filter(|s| !s.is_empty()),
+                s3_region: env_or("STORAGE_S3_REGION", "auto"),
+                s3_access_key_id: env::var("STORAGE_S3_ACCESS_KEY_ID")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+                s3_secret_access_key: env::var("STORAGE_S3_SECRET_ACCESS_KEY")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
             },
             stripe: StripeConfig {
                 secret_key: env_or("STRIPE_SECRET_KEY", ""),
