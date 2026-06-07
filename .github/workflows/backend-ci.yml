@@ -166,7 +166,7 @@ jobs:
         run: cargo outdated --root-deps-only
 
       - name: Check spelling in code comments and docs
-        uses: crate-ci/typos@v1.31.1
+        uses: crate-ci/typos@v1.47.2
         with:
           files: |
             .github
