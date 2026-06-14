@@ -31,6 +31,8 @@ use crate::common::error::{AppError, AppResult};
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Customer,
+    Support,
+    Staff,
     Admin,
 }
 
@@ -38,7 +40,21 @@ impl Role {
     pub fn as_str(&self) -> &'static str {
         match self {
             Role::Customer => "customer",
+            Role::Support => "support",
+            Role::Staff => "staff",
             Role::Admin => "admin",
+        }
+    }
+
+    /// Parse a role string stored in `user_roles.role`. Unknown or absent values
+    /// degrade to `Customer` — the default is least privilege, so a missing or
+    /// malformed row can never silently escalate access.
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "admin" => Role::Admin,
+            "staff" => Role::Staff,
+            "support" => Role::Support,
+            _ => Role::Customer,
         }
     }
 }
@@ -140,6 +156,38 @@ pub async fn verify_supabase(
 
 fn required_claims(names: &[&str]) -> HashSet<String> {
     names.iter().map(|s| s.to_string()).collect()
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::Role;
+
+    #[test]
+    fn known_roles_parse_exactly() {
+        assert_eq!(Role::from_db_str("admin"), Role::Admin);
+        assert_eq!(Role::from_db_str("staff"), Role::Staff);
+        assert_eq!(Role::from_db_str("support"), Role::Support);
+        assert_eq!(Role::from_db_str("customer"), Role::Customer);
+    }
+
+    #[test]
+    fn unknown_or_malformed_degrades_to_customer() {
+        // Least privilege: anything we don't recognize can never escalate.
+        for s in ["", "ADMIN", "Admin", "root", "superuser", " admin"] {
+            assert_eq!(
+                Role::from_db_str(s),
+                Role::Customer,
+                "{s:?} must degrade to Customer"
+            );
+        }
+    }
+
+    #[test]
+    fn as_str_roundtrips_through_from_db_str() {
+        for role in [Role::Customer, Role::Support, Role::Staff, Role::Admin] {
+            assert_eq!(Role::from_db_str(role.as_str()), role);
+        }
+    }
 }
 
 // ─── JWKS cache ─────────────────────────────────────────────────────────────

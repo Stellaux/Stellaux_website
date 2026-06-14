@@ -4,7 +4,7 @@
 //! same entry points.
 
 pub mod common;
-pub mod domain;
+pub mod domains;
 pub mod entity;
 pub mod migration;
 pub mod server;

@@ -12,12 +12,16 @@
 pub use sea_orm_migration::prelude::*;
 
 mod m20260516_000001_initial_catalog;
+mod m20260608_000001_user_roles;
 
 pub struct Migrator;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m20260516_000001_initial_catalog::Migration)]
+        vec![
+            Box::new(m20260516_000001_initial_catalog::Migration),
+            Box::new(m20260608_000001_user_roles::Migration),
+        ]
     }
 }

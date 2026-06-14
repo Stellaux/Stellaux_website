@@ -26,8 +26,8 @@ tower-http = { version = "0.6", features = [
   "catch-panic",
   "fs",
 ] }
-axum-prometheus = "0.7"
-metrics = "0.23"
+axum-prometheus = "0.8"
+metrics = "0.24"
 
 # Storage abstraction — local filesystem in dev, S3/R2/MinIO in prod.
 # `aws` feature enables S3-compatible backends.

@@ -37,7 +37,7 @@ use tower_http::{
 
 use crate::common::{
     app_state::AppState,
-    auth::{require_admin, require_auth},
+    auth::{require_supabase_admin, require_supabase_auth},
     config::StorageBackend,
     error::AppResult,
 };
@@ -93,41 +93,44 @@ fn build_router(state: AppState) -> Router {
                 async move { handle.render() }
             }),
         )
-        .nest("/api/v1/catalog", crate::domain::catalog::routes())
-        .nest("/api/v1/craft", crate::domain::craft::routes())
-        .nest("/api/v1/auth", crate::domain::auth::routes());
+        .nest("/api/v1/catalog", crate::domains::catalog::routes())
+        .nest("/api/v1/craft", crate::domains::craft::routes())
+        .nest("/api/v1/auth", crate::domains::auth::routes());
 
     // Local backend: serve uploaded assets from this server. S3/R2 backends
     // resolve via the bucket's public URL, so no route is mounted.
     if state.config.storage.backend == StorageBackend::Local {
-        public = public.nest_service(
-            "/storage",
-            ServeDir::new(&state.config.storage.local_path),
-        );
+        public = public.nest_service("/storage", ServeDir::new(&state.config.storage.local_path));
     }
 
     let public = public.layer(RequestBodyLimitLayer::new(body_limit));
 
     // ── Webhooks: no auth (handler verifies signature), large body limit ─
     let webhooks: Router<AppState> = Router::new()
-        .nest("/api/v1/webhooks", crate::domain::webhooks::routes())
+        .nest("/api/v1/webhooks", crate::domains::webhooks::routes())
         .layer(RequestBodyLimitLayer::new(webhook_body_limit));
 
-    // ── Protected: any valid JWT ─────────────────────────────────────────
-    // NOTE: `require_auth` accepts HS256 tokens we issue. For Supabase-signed
-    // tokens from the frontend, swap to `require_supabase_auth` (also imported
-    // from `crate::common::auth`) and ensure SUPABASE_JWKS_URL is set.
+    // ── Protected: any valid Supabase JWT ────────────────────────────────
+    // Supabase is the unified identity provider; `require_supabase_auth`
+    // verifies the RS256 token and resolves the caller's role from `user_roles`.
+    // Requires SUPABASE_JWKS_URL to be set (else these routes return 500).
     let protected: Router<AppState> = Router::new()
-        .nest("/api/v1/cart", crate::domain::cart::routes())
-        .nest("/api/v1/checkout", crate::domain::checkout::routes())
-        .nest("/api/v1/account", crate::domain::account::routes())
-        .layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .nest("/api/v1/cart", crate::domains::cart::routes())
+        .nest("/api/v1/checkout", crate::domains::checkout::routes())
+        .nest("/api/v1/account", crate::domains::account::routes())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_supabase_auth,
+        ))
         .layer(RequestBodyLimitLayer::new(body_limit));
 
-    // ── Admin: valid JWT + role == "admin" ───────────────────────────────
+    // ── Admin: valid Supabase JWT + role == "admin" (from `user_roles`) ──
     let admin: Router<AppState> = Router::new()
-        .nest("/api/v1/admin", crate::domain::admin::routes())
-        .layer(middleware::from_fn_with_state(state.clone(), require_admin))
+        .nest("/api/v1/admin", crate::domains::admin::routes())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_supabase_admin,
+        ))
         .layer(RequestBodyLimitLayer::new(body_limit));
 
     // ── Global middleware (applied to all merged routes) ─────────────────

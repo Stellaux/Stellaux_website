@@ -1,35 +1,20 @@
-//! Modular craft builder: bases, accessories, compatibility lookup.
-//!
-//! Mounted at `/api/v1/craft/*` in the public route group (no auth).
-
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     routing::get,
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::common::{app_state::AppState, error::AppResult};
-
+use crate::{
+    common::{app_state::AppState, error::AppResult},
+    domains::craft::dto::{AccessoriesQuery, BasesQuery},
+};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/bases", get(list_bases))
         .route("/accessories", get(list_accessories))
         .route("/compatibility/{base_handle}", get(get_compatibility))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BasesQuery {
-    /// "pendant" | "chain" | "trunk"
-    pub r#type: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AccessoriesQuery {
-    /// Filter accessories compatible with this base handle.
-    pub base_handle: Option<String>,
 }
 
 async fn list_bases(

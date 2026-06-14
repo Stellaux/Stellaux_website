@@ -22,7 +22,12 @@ impl MigrationTrait for Migration {
                             .primary_key()
                             .default(Expr::cust("gen_random_uuid()")),
                     )
-                    .col(ColumnDef::new(Products::Handle).text().not_null().unique_key())
+                    .col(
+                        ColumnDef::new(Products::Handle)
+                            .text()
+                            .not_null()
+                            .unique_key(),
+                    )
                     .col(ColumnDef::new(Products::Name).text().not_null())
                     .col(ColumnDef::new(Products::Description).text())
                     .col(ColumnDef::new(Products::Collection).text())
@@ -102,7 +107,11 @@ impl MigrationTrait for Migration {
                             .unique_key(),
                     )
                     .col(ColumnDef::new(ProductVariants::Size).text())
-                    .col(ColumnDef::new(ProductVariants::PriceCents).integer().not_null())
+                    .col(
+                        ColumnDef::new(ProductVariants::PriceCents)
+                            .integer()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(ProductVariants::WeightGrams)
                             .integer()
@@ -224,9 +233,21 @@ impl MigrationTrait for Migration {
                             .primary_key()
                             .default(Expr::cust("gen_random_uuid()")),
                     )
-                    .col(ColumnDef::new(InventoryAdjustments::VariantId).uuid().not_null())
-                    .col(ColumnDef::new(InventoryAdjustments::Delta).integer().not_null())
-                    .col(ColumnDef::new(InventoryAdjustments::Reason).text().not_null())
+                    .col(
+                        ColumnDef::new(InventoryAdjustments::VariantId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(InventoryAdjustments::Delta)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(InventoryAdjustments::Reason)
+                            .text()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(InventoryAdjustments::Channel).text())
                     .col(ColumnDef::new(InventoryAdjustments::ActorUserId).uuid())
                     .col(ColumnDef::new(InventoryAdjustments::Notes).text())

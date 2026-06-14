@@ -18,6 +18,7 @@ pub mod inventory_levels;
 pub mod product_images;
 pub mod product_variants;
 pub mod products;
+pub mod user_roles;
 
 pub mod prelude {
     pub use super::craft_compatibility::Entity as CraftCompatibility;
@@ -25,4 +26,5 @@ pub mod prelude {
     pub use super::product_images::Entity as ProductImages;
     pub use super::product_variants::Entity as ProductVariants;
     pub use super::products::Entity as Products;
+    pub use super::user_roles::Entity as UserRoles;
 }

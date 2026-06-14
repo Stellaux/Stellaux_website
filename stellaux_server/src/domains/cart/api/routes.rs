@@ -1,38 +1,24 @@
-//! Server-side cart for both guests (anon cookie) and authenticated users.
-//!
-//! Mounted at `/api/v1/cart/*` in the protected route group.
-
 use axum::{
     Json, Router,
     extract::{Path, State},
     routing::{get, post},
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::common::{app_state::AppState, error::AppResult};
+use crate::{
+    common::{app_state::AppState, error::AppResult},
+    domains::cart::dto::{AddItem, UpdateItem},
+};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(get_cart).delete(clear_cart))
         .route("/items", post(add_item))
-        .route("/items/{item_id}", axum::routing::patch(update_item).delete(remove_item))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AddItem {
-    pub variant_id: Uuid,
-    pub qty: i32,
-    /// When adding a Craft assembly, all component lines share this id.
-    pub assembly_id: Option<Uuid>,
-    /// "base" | "accessory" — only meaningful when `assembly_id` is set.
-    pub assembly_role: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateItem {
-    pub qty: i32,
+        .route(
+            "/items/{item_id}",
+            axum::routing::patch(update_item).delete(remove_item),
+        )
 }
 
 async fn get_cart(State(_state): State<AppState>) -> AppResult<Json<Value>> {

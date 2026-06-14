@@ -1,16 +1,14 @@
-//! Public catalog: products, variants, collections, categories.
-//!
-//! Mounted at `/api/v1/catalog/*` in the public route group (no auth).
-
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     routing::get,
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::common::{app_state::AppState, dto::Pagination, error::AppResult};
+use crate::{
+    common::{app_state::AppState, error::AppResult},
+    domains::catalog::dto::ProductFilter,
+};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -18,16 +16,6 @@ pub fn routes() -> Router<AppState> {
         .route("/products/{handle}", get(get_product))
         .route("/collections", get(list_collections))
         .route("/categories", get(list_categories))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ProductFilter {
-    pub category: Option<String>,
-    pub material: Option<String>,
-    pub collection: Option<String>,
-    pub sort: Option<String>, // "popularity" | "price_asc" | "price_desc" | "newest"
-    #[serde(flatten)]
-    pub page: Pagination,
 }
 
 async fn list_products(
@@ -56,5 +44,7 @@ async fn list_collections(State(_state): State<AppState>) -> AppResult<Json<Valu
 }
 
 async fn list_categories(State(_state): State<AppState>) -> AppResult<Json<Value>> {
-    Ok(Json(json!({ "items": ["rings", "necklaces", "earrings", "bracelets"] })))
+    Ok(Json(
+        json!({ "items": ["rings", "necklaces", "earrings", "bracelets"] }),
+    ))
 }

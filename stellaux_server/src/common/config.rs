@@ -160,13 +160,12 @@ impl Config {
             },
             storage: StorageConfig {
                 backend: StorageBackend::parse(&env_or("STORAGE_BACKEND", "local")),
-                public_base_url: env_or(
-                    "STORAGE_PUBLIC_URL",
-                    "http://localhost:8080/storage",
-                ),
+                public_base_url: env_or("STORAGE_PUBLIC_URL", "http://localhost:8080/storage"),
                 local_path: env_or("STORAGE_LOCAL_PATH", "./storage"),
                 s3_bucket: env::var("STORAGE_S3_BUCKET").ok().filter(|s| !s.is_empty()),
-                s3_endpoint: env::var("STORAGE_S3_ENDPOINT").ok().filter(|s| !s.is_empty()),
+                s3_endpoint: env::var("STORAGE_S3_ENDPOINT")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
                 s3_region: env_or("STORAGE_S3_REGION", "auto"),
                 s3_access_key_id: env::var("STORAGE_S3_ACCESS_KEY_ID")
                     .ok()

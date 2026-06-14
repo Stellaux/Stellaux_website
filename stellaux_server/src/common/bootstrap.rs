@@ -92,8 +92,7 @@ fn init_tracing() {
     // APP_ENV is read directly here (Config isn't loaded yet — tracing must
     // come first so subsequent steps can emit logs).
     let env = std::env::var("APP_ENV").unwrap_or_else(|_| "dev".into());
-    let is_prod =
-        env.eq_ignore_ascii_case("prod") || env.eq_ignore_ascii_case("production");
+    let is_prod = env.eq_ignore_ascii_case("prod") || env.eq_ignore_ascii_case("production");
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let registry = tracing_subscriber::registry().with(env_filter);

@@ -1,18 +1,14 @@
-//! Authenticated customer account: profile, orders, addresses.
-//!
-//! Mounted at `/api/v1/account/*` in the protected route group.
-
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     routing::{get, post},
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::common::{
-    app_state::AppState, auth::AuthUser, dto::Pagination, error::AppResult,
+use crate::{
+    common::{app_state::AppState, auth::AuthUser, dto::Pagination, error::AppResult},
+    domains::account::dto::{ChangePasswordRequest, UpdateProfileRequest, UpsertAddress},
 };
 
 pub fn routes() -> Router<AppState> {
@@ -28,31 +24,6 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-#[derive(Debug, Deserialize)]
-pub struct UpdateProfileRequest {
-    pub display_name: Option<String>,
-    pub email: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ChangePasswordRequest {
-    pub current_password: String,
-    pub new_password: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpsertAddress {
-    pub label: Option<String>,
-    pub recipient: String,
-    pub street: String,
-    pub city: String,
-    pub state: Option<String>,
-    pub postal_code: String,
-    pub country: String,
-    pub phone: Option<String>,
-    pub is_default: bool,
-}
-
 async fn get_me(user: AuthUser) -> AppResult<Json<Value>> {
     Ok(Json(json!({
         "user_id": user.0.sub,
@@ -66,7 +37,9 @@ async fn update_me(
     State(_state): State<AppState>,
     Json(_body): Json<UpdateProfileRequest>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(json!({ "_todo": "update profiles row + auth.users email if changed" })))
+    Ok(Json(
+        json!({ "_todo": "update profiles row + auth.users email if changed" }),
+    ))
 }
 
 async fn change_password(
@@ -102,10 +75,7 @@ async fn get_order(
     })))
 }
 
-async fn list_addresses(
-    _user: AuthUser,
-    State(_state): State<AppState>,
-) -> AppResult<Json<Value>> {
+async fn list_addresses(_user: AuthUser, State(_state): State<AppState>) -> AppResult<Json<Value>> {
     Ok(Json(json!({ "items": [] })))
 }
 

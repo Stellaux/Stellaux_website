@@ -1,18 +1,12 @@
-//! Public auth endpoints — issuing our own HS256 tokens.
-//!
-//! Mounted at `/api/v1/auth/*` in the public route group (no auth on the
-//! endpoints themselves; the *result* is a token used elsewhere).
-//!
-//! Customer authentication primarily flows through Supabase Auth on the
-//! frontend; the Rust API verifies those Supabase RS256 tokens via
-//! `require_supabase_auth`. These endpoints exist for admin sign-in and any
-//! non-Supabase service accounts that need our HS256 tokens.
-
 use axum::{Json, Router, extract::State, routing::post};
-use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::common::{app_state::AppState, error::AppResult};
+use crate::{
+    common::{app_state::AppState, error::AppResult},
+    domains::auth::dto::{
+        ForgotPasswordRequest, LoginRequest, ResetPasswordRequest, SignupRequest,
+    },
+};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -20,30 +14,6 @@ pub fn routes() -> Router<AppState> {
         .route("/signup", post(signup))
         .route("/forgot-password", post(forgot_password))
         .route("/reset-password", post(reset_password))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct LoginRequest {
-    pub email: String,
-    pub password: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SignupRequest {
-    pub email: String,
-    pub password: String,
-    pub display_name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ForgotPasswordRequest {
-    pub email: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ResetPasswordRequest {
-    pub token: String,
-    pub new_password: String,
 }
 
 async fn login(
