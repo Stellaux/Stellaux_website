@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Internal Tools (Phase 3) — Architecture</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="site-header__inner">
+    <div class="brand">The Polished Standard <small>· Architecture</small></div>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <a href="external-services.html">External Services</a>
+      <a href="endpoints.html">API Endpoints</a>
+      <a href="endpoints-rest.html">REST Reference</a>
+      <a class="is-active" href="internal-tools.html">Internal Tools</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="observability.html">Observability</a>
+      <a href="scaling.html">Future Scaling</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <header class="page-header">
+    <h1>Internal Tools — Catalog Management <span class="pill pill--planned">Phase 3 · planned</span></h1>
+    <p class="subtitle">
+      Weeks 6–9 of the build plan. All internal tooling stays on a private VPS,
+      completely separate from the public storefront. Same Rust binary, same
+      Supabase Postgres, different route group, different network exposure.
+    </p>
+  </header>
+
+  <h2>Scope (Phase 3)</h2>
+
+  <table>
+    <thead>
+      <tr><th>Task</th><th>Where it lives</th><th>Why</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Catalog management (inventory, product metadata, pricing)</td>
+        <td>Internal VPS + <strong>Supabase Postgres</strong></td>
+        <td>Relational data with complex joins (variants × inventory × channel listings) and SQL-friendly analytics. Supabase Realtime channels handle live updates per-table.</td>
+      </tr>
+      <tr>
+        <td>Transaction logging + low-stock alerts dashboard</td>
+        <td>Internal VPS (React + Rust backend)</td>
+        <td>Keep the internal UI and its logic off the public edge. Same auth surface as the admin role, but bound to an internal hostname.</td>
+      </tr>
+      <tr>
+        <td>Live product syncing across sales channels (Etsy, Facebook Marketplace, eBay)</td>
+        <td>Internal VPS background worker</td>
+        <td>Scheduled tasks pull/push inventory data; no serverless needed. Worker reads/writes the same Supabase Postgres.</td>
+      </tr>
+      <tr>
+        <td>Automated workflows for order confirmation, shipping label generation, order management</td>
+        <td>Internal VPS + Shippo API</td>
+        <td>Background jobs handle these; Shippo webhooks drive realtime status updates.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <strong>Datastore choice.</strong> Phase 3 uses
+    <strong>Supabase (Postgres)</strong>, not Firestore. A relational store
+    makes catalog joins, transaction reporting, and the Phase 4 AI analytics
+    agent (SQL-driven sales-trend queries) materially easier. Supabase's
+    real-time engine covers the dashboard live-update use case once tables are
+    explicitly published.
+  </div>
+
+  <h2>Deployment shape</h2>
+
+  <pre class="diagram">
+   public internet ──▶ Cloudflare ──▶ stellaux_server (public API)
+                                          │
+                                          └──▶ Supabase Postgres ◀──┐
+                                                                    │
+   admin user (VPN / IP-allowlist) ──▶ private VPS ──▶ internal API ┘
+                                            │
+                                            ├──▶ dashboard SPA (served from same host)
+                                            └──▶ background workers
+                                                  • channel sync (Etsy/eBay/FB)
+                                                  • low-stock alert cron
+                                                  • shipping automation
+  </pre>
+
+  <h4>Why one binary, two deployments</h4>
+  <ul>
+    <li>Public deployment binds <code>:8080</code> on the public LB; internal-only routes are <em>not registered</em> in that build via a feature flag.</li>
+    <li>Internal deployment runs the same image with <code>FEATURES=internal_tools</code>, exposes only on the VPN-side interface, fronted by Caddy with IP allowlist.</li>
+    <li>Schema and migrations are shared; both servers point at the same Supabase Postgres.</li>
+  </ul>
+
+  <h2>Route base path</h2>
+  <p>All internal endpoints sit under <code>/api/v1/internal/*</code> and the route group requires:</p>
+  <ol>
+    <li><strong>Network</strong>: request must arrive on the internal interface (validated by Caddy and asserted again by middleware).</li>
+    <li><strong>Auth</strong>: JWT with <code>role ∈ {admin, ops, fulfillment}</code>.</li>
+    <li><strong>mTLS</strong> (optional, recommended): client cert pinned for service-to-service callers (workers, cron jobs).</li>
+  </ol>
+
+  <div class="docs-shell">
+
+    <aside class="docs-sidebar">
+      <h4>Catalog mgmt</h4>
+      <ul>
+        <li><a href="#products">Products &amp; variants</a></li>
+        <li><a href="#bulk">Bulk import / export</a></li>
+        <li><a href="#pricing">Pricing rules</a></li>
+      </ul>
+      <h4>Inventory</h4>
+      <ul>
+        <li><a href="#inventory">Adjustments &amp; transfers</a></li>
+        <li><a href="#low-stock">Low-stock alerts</a></li>
+      </ul>
+      <h4>Channel sync</h4>
+      <ul>
+        <li><a href="#channels">Etsy / eBay / FB Marketplace</a></li>
+      </ul>
+      <h4>Fulfillment</h4>
+      <ul>
+        <li><a href="#fulfillment">Automated workflows</a></li>
+      </ul>
+      <h4>Transactions</h4>
+      <ul>
+        <li><a href="#transactions">Transaction log</a></li>
+      </ul>
+      <h4>Realtime</h4>
+      <ul>
+        <li><a href="#realtime">Supabase Realtime channels</a></li>
+      </ul>
+    </aside>
+
+    <section class="docs-content">
+
+      <!-- ─── Products & variants ──────────────────────────────────── -->
+      <article id="products" class="docs-section is-default">
+        <h2>Products &amp; variants <span class="pill pill--planned">planned</span></h2>
+        <p>Most of the public admin product surface (<a href="endpoints-rest.html#admin-products">/api/v1/admin/products</a>) is reused. Phase 3 adds the bulk and history operations the operator dashboard needs.</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/internal/products/{product_id}/history</span><span class="endpoint__auth"><span class="badge">admin/ops</span></span></div>
+          <div class="endpoint__body">
+            <h5>Description</h5>
+            <p>Append-only audit history for one product: every metadata edit, every variant CRUD, every inventory adjustment, with actor + timestamp.</p>
+            <h5>Response 200</h5>
+            <pre><code>[
+  { "ts":"…","actor":"alex@…","action":"variant.create","details":{ "sku":"NP-S" } },
+  { "ts":"…","actor":"system","action":"inventory.adjust","details":{ "delta": -1, "reason":"website" } }
+]</code></pre>
+            <h5>Implementation</h5>
+            <p>Sourced from the existing <code>audit_log</code> + <code>inventory_adjustments</code> tables, merged in SQL with <code>UNION ALL</code> on a normalized projection.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/internal/products/{product_id}/duplicate</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body">
+            <p>Create a new draft product cloned from an existing one. New <code>handle</code> derived from the source with a numeric suffix until unique. Variants are duplicated with placeholder SKUs (<code>{old_sku}-COPY</code>).</p>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Bulk import/export ───────────────────────────────────── -->
+      <article id="bulk" class="docs-section">
+        <h2>Bulk import / export <span class="pill pill--planned">planned</span></h2>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/internal/products/import</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body">
+            <h5>Headers</h5>
+            <table class="param-table"><tbody>
+              <tr><td><code>Content-Type</code> <span class="req">req</span></td><td><code>multipart/form-data</code></td></tr>
+            </tbody></table>
+            <h5>Form fields</h5>
+            <table class="param-table"><tbody>
+              <tr><td><code>file</code> <span class="req">req</span></td><td>CSV per the published schema (header row: <code>handle,name,collection,category,material,sku,size,price_cents,weight_grams,on_hand</code>).</td></tr>
+              <tr><td><code>dry_run</code></td><td><code>true</code> to validate without persisting.</td></tr>
+              <tr><td><code>upsert</code></td><td><code>true</code> to update existing rows by <code>handle</code> + <code>sku</code>.</td></tr>
+            </tbody></table>
+            <h5>Response 202</h5>
+            <pre><code>{ "import_id": "uuid", "status": "running", "rows_total": 412 }</code></pre>
+            <p>Long-running job; poll <code>GET /api/v1/internal/imports/{import_id}</code>.</p>
+            <h5>Implementation</h5>
+            <ul>
+              <li>CSV is streamed into a temp table; validations run in SQL; only on success do rows promote to <code>products</code>/<code>product_variants</code>.</li>
+              <li>Whole import runs in one transaction; partial failures roll back.</li>
+              <li>Image columns reference URLs in object storage; uploads happen separately via <code>POST /api/v1/internal/assets</code>.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/internal/products/export</span><span class="endpoint__auth"><span class="badge">admin/ops</span></span></div>
+          <div class="endpoint__body">
+            <h5>Query</h5>
+            <table class="param-table"><tbody>
+              <tr><td><code>format</code></td><td><code>csv</code> (default) or <code>jsonl</code></td></tr>
+              <tr><td><code>include</code></td><td>Comma-separated: <code>variants</code>, <code>inventory</code>, <code>channel_listings</code></td></tr>
+            </tbody></table>
+            <p>Streamed response with appropriate <code>Content-Type</code> + <code>Content-Disposition: attachment</code>.</p>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Pricing rules ────────────────────────────────────────── -->
+      <article id="pricing" class="docs-section">
+        <h2>Pricing rules <span class="pill pill--planned">planned</span></h2>
+        <p>Centralizes per-variant price overrides, discounts (when introduced), and channel-specific markup.</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/internal/pricing/rules</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body"><p>List active pricing rules with their scope (global / collection / variant) and effective dates.</p></div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/internal/pricing/rules</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body">
+            <h5>Body</h5>
+            <pre><code>{
+  "scope": "variant",
+  "variant_id": "uuid",
+  "channel": "etsy",
+  "markup_pct": 5.0,
+  "starts_at": "2026-06-01T00:00:00Z",
+  "ends_at": null
+}</code></pre>
+            <h5>Behavior</h5>
+            <p>Rules are evaluated in order of specificity (variant &gt; collection &gt; global). Channel sync workers consult this table before pushing prices to Etsy/eBay.</p>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Inventory ────────────────────────────────────────────── -->
+      <article id="inventory" class="docs-section">
+        <h2>Inventory adjustments &amp; transfers <span class="pill pill--planned">planned</span></h2>
+        <p>Extends the existing <a href="endpoints-rest.html#admin-inventory">admin inventory</a> endpoints with bulk operations and multi-location support.</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/internal/inventory/bulk</span><span class="endpoint__auth"><span class="badge">admin/ops</span></span></div>
+          <div class="endpoint__body">
+            <h5>Body</h5>
+            <pre><code>{
+  "reason": "restock",
+  "channel": "website",
+  "items": [
+    { "variant_id":"uuid","delta": 12 },
+    { "variant_id":"uuid","delta":  4 }
+  ],
+  "notes": "PO #4421"
+}</code></pre>
+            <p>Atomic across the whole batch. Each row writes both an <code>inventory_adjustments</code> entry and updates <code>inventory_levels.on_hand</code>.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/internal/inventory/transfer</span><span class="endpoint__auth"><span class="badge">ops</span></span></div>
+          <div class="endpoint__body">
+            <h5>Body</h5>
+            <pre><code>{ "from_location":"warehouse_main","to_location":"studio_la",
+  "variant_id":"uuid","qty":3 }</code></pre>
+            <p>Records a paired adjustment (<code>-3</code> source / <code>+3</code> dest) with a shared <code>transfer_id</code> for traceability. Location field is added in the Phase 3 migration if multi-location is in scope.</p>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Low-stock alerts ─────────────────────────────────────── -->
+      <article id="low-stock" class="docs-section">
+        <h2>Low-stock alerts <span class="pill pill--planned">planned</span></h2>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/internal/alerts/low-stock</span><span class="endpoint__auth"><span class="badge">admin/ops</span></span></div>
+          <div class="endpoint__body">
+            <h5>Query</h5>
+            <table class="param-table"><tbody>
+              <tr><td><code>threshold</code></td><td>int (default 3)</td></tr>
+              <tr><td><code>since</code></td><td>ISO date — only variants that <em>crossed</em> the threshold after this date</td></tr>
+            </tbody></table>
+            <p>Used by the dashboard's persistent banner and by the daily summary email.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/internal/alerts/low-stock/dismiss</span><span class="endpoint__auth"><span class="badge">admin/ops</span></span></div>
+          <div class="endpoint__body">
+            <h5>Body</h5>
+            <pre><code>{ "variant_id":"uuid","snooze_hours": 48 }</code></pre>
+            <p>Suppresses the alert for a window so re-stocks in progress don't keep paging. Tracked in a small <code>alert_snoozes</code> table.</p>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Channels ─────────────────────────────────────────────── -->
+      <article id="channels" class="docs-section">
+        <h2>Channel sync — Etsy / eBay / Facebook Marketplace <span class="pill pill--planned">planned</span></h2>
+        <p>Worker-driven; these endpoints let the dashboard inspect and trigger.</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/internal/channels/{channel}/listings</span><span class="endpoint__auth"><span class="badge">admin/ops</span></span></div>
+          <div class="endpoint__body">
+            <h5>Path</h5>
+            <table class="param-table"><tbody>
+              <tr><td><code>channel</code></td><td><code>etsy</code> | <code>ebay</code> | <code>facebook</code></td></tr>
+            </tbody></table>
+            <p>Lists <code>channel_listings</code> rows for the channel plus the joined variant SKU + product name + current price.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/internal/channels/{channel}/sync</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body">
+            <h5>Body (optional)</h5>
+            <pre><code>{ "variant_ids": ["uuid", "uuid"] }</code></pre>
+            <p>Omit body to sync everything. Returns a <code>job_id</code>; worker picks it up off the Postgres queue and reports back via <code>POST /api/v1/internal/channels/{channel}/sync/{job_id}/status</code> (worker-internal).</p>
+            <h5>Implementation</h5>
+            <ul>
+              <li>Reads price + inventory + pricing rules from Supabase Postgres.</li>
+              <li>Calls Etsy <code>updateInventory</code> / eBay <code>reviseInventoryStatus</code> / FB Catalog API <code>POST /catalog/items_batch</code>.</li>
+              <li>Writes outcome to <code>channel_listings.sync_status</code> + a row in <code>webhook_events(source='etsy_sync',…)</code> for replayability.</li>
+              <li>Emits <code>stellaux_external_calls_total{service="etsy",operation="updateInventory"}</code>.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/internal/channels/{channel}/orders/import</span><span class="endpoint__auth"><span class="badge">admin/ops</span></span></div>
+          <div class="endpoint__body">
+            <h5>Body</h5>
+            <pre><code>{
+  "external_order_id": "etsy-12345",
+  "customer": { "name":"…","email":"…","address":{ … } },
+  "items": [ { "variant_id":"uuid","qty":1,"unit_price_cents":13900 } ],
+  "shipping_cost_cents": 850,
+  "tax_cents": 0,
+  "occurred_at": "2026-05-29T11:02:00Z"
+}</code></pre>
+            <p>Manually record an order arriving via a channel — the v1 marketplace path. <code>orders.source</code> = channel, <code>external_order_id</code> set; decrements inventory through the standard path.</p>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Fulfillment ──────────────────────────────────────────── -->
+      <article id="fulfillment" class="docs-section">
+        <h2>Automated fulfillment workflows <span class="pill pill--planned">planned</span></h2>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/internal/fulfillment/orders/{order_id}/ship</span><span class="endpoint__auth"><span class="badge">ops/fulfillment</span></span></div>
+          <div class="endpoint__body">
+            <p>Manual trigger of the ship workflow: (1) purchase Shippo label, (2) email customer, (3) flip <code>orders.fulfillment_status = 'fulfilled'</code>, (4) push tracking to channel if external order.</p>
+            <p>Most orders run this workflow automatically on <code>checkout.session.completed</code>; this endpoint is the operator-driven retry.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/internal/fulfillment/orders/{order_id}/return</span><span class="endpoint__auth"><span class="badge">ops</span></span></div>
+          <div class="endpoint__body">
+            <h5>Body</h5>
+            <pre><code>{ "reason": "customer_request",
+  "restock": true,
+  "refund_amount_cents": 12800 }</code></pre>
+            <p>Generates a Shippo return label, emails the customer, and pre-records the inventory restock to apply on scan-in.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/internal/fulfillment/queue</span><span class="endpoint__auth"><span class="badge">ops/fulfillment</span></span></div>
+          <div class="endpoint__body">
+            <p>Operator dashboard: orders awaiting fulfillment, sorted by promised ship date, with packer notes and label status.</p>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Transactions ─────────────────────────────────────────── -->
+      <article id="transactions" class="docs-section">
+        <h2>Transaction log <span class="pill pill--planned">planned</span></h2>
+        <p>Reporting endpoints over <code>orders</code> + <code>order_items</code> + <code>inventory_adjustments</code>. Read-only; backed by the (eventual) Postgres read replica in S3+ — see <a href="scaling.html#db-layer">Scaling</a>.</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/internal/reports/transactions</span><span class="endpoint__auth"><span class="badge">admin/ops</span></span></div>
+          <div class="endpoint__body">
+            <h5>Query</h5>
+            <table class="param-table"><tbody>
+              <tr><td><code>from</code> / <code>to</code></td><td>ISO date (UTC) <span class="req">req</span></td><td>Inclusive range.</td></tr>
+              <tr><td><code>group_by</code></td><td>enum</td><td><code>day</code> | <code>week</code> | <code>channel</code> | <code>product</code></td></tr>
+              <tr><td><code>currency</code></td><td>string</td><td>Defaults to USD.</td></tr>
+            </tbody></table>
+            <h5>Response 200</h5>
+            <pre><code>[
+  { "bucket":"2026-05-22","orders":14,"revenue_cents":182300,"refund_cents":0 },
+  { "bucket":"2026-05-23","orders":11,"revenue_cents":145000,"refund_cents":12800 }
+]</code></pre>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/internal/reports/inventory-velocity</span><span class="endpoint__auth"><span class="badge">admin/ops</span></span></div>
+          <div class="endpoint__body">
+            <p>Per-variant sell-through over a window. Drives reorder suggestions in the dashboard.</p>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Realtime ─────────────────────────────────────────────── -->
+      <article id="realtime" class="docs-section">
+        <h2>Realtime channels (Supabase) <span class="pill pill--planned">planned</span></h2>
+        <p>The dashboard subscribes directly to Supabase Realtime over a service-role JWT inside the private network. No new endpoints; these are the published tables.</p>
+
+        <table>
+          <thead><tr><th>Table</th><th>Events</th><th>Drives</th></tr></thead>
+          <tbody>
+            <tr><td><code>orders</code></td><td>INSERT, UPDATE</td><td>Live "new order" toast; status changes in the queue view.</td></tr>
+            <tr><td><code>inventory_levels</code></td><td>UPDATE</td><td>Stock badges across all open dashboard tabs.</td></tr>
+            <tr><td><code>channel_listings</code></td><td>UPDATE</td><td>Sync status pill turns red the moment a worker reports an error.</td></tr>
+            <tr><td><code>webhook_events</code></td><td>INSERT</td><td>Live feed for the integrations debugging panel.</td></tr>
+          </tbody>
+        </table>
+
+        <h4>Enabling Realtime for a table</h4>
+        <pre><code>-- migration
+alter publication supabase_realtime add table public.orders;
+alter publication supabase_realtime add table public.inventory_levels;
+-- …</code></pre>
+        <p>Row-level security still applies — the dashboard uses a service-role JWT signed only on the internal VPS.</p>
+      </article>
+
+    </section>
+  </div>
+
+  <h2>Open questions before build</h2>
+
+  <ol>
+    <li>
+      <strong>Operator headcount.</strong> How many simultaneous dashboard users will Phase 3 have? Affects whether realtime subscriptions need a dedicated read replica or share the primary.
+    </li>
+    <li>
+      <strong>Multi-location inventory.</strong> Confirmed needed in Phase 3 or deferred? Adds a <code>locations</code> table + a <code>location_id</code> column to <code>inventory_levels</code> if so.
+    </li>
+    <li>
+      <strong>Facebook Marketplace status.</strong> FB's Catalog API is the modern path; Marketplace API itself is approval-gated. Confirm we have access before scoping the connector.
+    </li>
+    <li>
+      <strong>Internal hostname &amp; auth.</strong> Cloudflare Tunnel + Access? WireGuard? Tailscale + magic DNS? Affects the network middleware design.
+    </li>
+    <li>
+      <strong>Backups for operator-uploaded assets</strong> (bulk import CSVs, supplier receipts). Same R2 bucket with a separate prefix, or dedicated?
+    </li>
+  </ol>
+
+</main>
+
+<footer class="site-footer">
+  <div class="meta">Internal Tools (Phase 3) · drafted 2026-05-28 · all endpoints planned, none live yet</div>
+</footer>
+
+</body>
+</html>

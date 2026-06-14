@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>External Services — Architecture</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="site-header__inner">
+    <div class="brand">The Polished Standard <small>· Architecture</small></div>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <a class="is-active" href="external-services.html">External Services</a>
+      <a href="endpoints.html">API Endpoints</a>
+      <a href="endpoints-rest.html">REST Reference</a>
+      <a href="internal-tools.html">Internal Tools</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="observability.html">Observability</a>
+      <a href="scaling.html">Future Scaling</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <header class="page-header">
+    <h1>External Services</h1>
+    <p class="subtitle">
+      Every third party in the production critical path, what we use it for,
+      how we authenticate, and what happens when it fails.
+    </p>
+  </header>
+
+  <div class="toc">
+    <strong>On this page</strong>
+    <ol>
+      <li><a href="#stripe">Stripe — payments</a></li>
+      <li><a href="#shippo">Shippo — shipping &amp; tracking</a></li>
+      <li><a href="#resend">Resend — transactional email</a></li>
+      <li><a href="#supabase">Supabase — Postgres, auth, storage</a></li>
+      <li><a href="#storage">Supabase Storage — product images</a></li>
+      <li><a href="#marketplaces">Etsy &amp; eBay — sales channels</a></li>
+      <li><a href="#cloudflare">Cloudflare — Workers, DNS, CDN</a></li>
+      <li><a href="#failure-modes">Failure modes &amp; recovery</a></li>
+      <li><a href="#secrets">Secrets inventory</a></li>
+    </ol>
+  </div>
+
+  <h2>Summary</h2>
+
+  <table>
+    <thead>
+      <tr><th>Service</th><th>Role</th><th>SDK / transport</th><th>In critical path?</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Stripe</td><td>Payments, refunds, tax (optional)</td><td>REST via <code>reqwest</code></td><td><span class="badge badge--bad">Yes</span></td></tr>
+      <tr><td>Shippo</td><td>Rate quotes, label purchase, tracking</td><td>REST via <code>reqwest</code></td><td><span class="badge badge--warn">Checkout + post-pay</span></td></tr>
+      <tr><td>Resend</td><td>Transactional email</td><td>REST via <code>reqwest</code></td><td><span class="badge badge--good">Async</span></td></tr>
+      <tr><td>Supabase Auth</td><td>OIDC issuer (optional)</td><td>JWKS over HTTPS</td><td><span class="badge badge--warn">If enabled</span></td></tr>
+      <tr><td>Supabase Storage</td><td>Product-image storage</td><td>Backend storage contract</td><td><span class="badge badge--warn">Catalog imagery</span></td></tr>
+      <tr><td>Etsy / eBay</td><td>Sales channels</td><td>REST (deferred)</td><td><span class="badge badge--good">Async</span></td></tr>
+      <tr><td>Cloudflare</td><td>Workers, CDN, DNS, R2</td><td>Platform</td><td><span class="badge badge--bad">Yes (storefront)</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="stripe">Stripe — payments</h2>
+
+  <div class="card">
+    <h3>Surface area</h3>
+    <ul>
+      <li><strong>Checkout Sessions</strong> — server creates a hosted session, redirects the user.</li>
+      <li><strong>PaymentIntents</strong> — implicit, owned by the session.</li>
+      <li><strong>Refunds</strong> — issued from the admin UI; logged with <code>actor_user_id</code>.</li>
+      <li><strong>Stripe Tax</strong> — optional (<code>automatic_tax: { enabled: true }</code>); 0.5% per order.</li>
+      <li><strong>Webhooks</strong> — Stripe → <code>POST /api/v1/webhooks/stripe</code>.</li>
+    </ul>
+    <h4>Events we handle</h4>
+    <table>
+      <thead><tr><th>Event</th><th>Action</th></tr></thead>
+      <tbody>
+        <tr><td><code>checkout.session.completed</code></td><td>Create <code>orders</code> + <code>order_items</code>; decrement inventory; trigger Shippo label purchase; queue order confirmation email.</td></tr>
+        <tr><td><code>checkout.session.expired</code></td><td>Release reserved inventory; mark cart <code>abandoned</code>.</td></tr>
+        <tr><td><code>payment_intent.payment_failed</code></td><td>Release reservations; log; no email.</td></tr>
+        <tr><td><code>charge.refunded</code></td><td>Update <code>orders.fulfillment_status = 'refunded'</code>; restock if pre-fulfillment; queue refund email.</td></tr>
+        <tr><td><code>charge.dispute.created</code></td><td>Notify admin; do not auto-refund.</td></tr>
+      </tbody>
+    </table>
+    <h4>Authentication</h4>
+    <ul>
+      <li>Outbound: <code>STRIPE_SECRET_KEY</code> sent as bearer.</li>
+      <li>Inbound (webhooks): HMAC over the <em>raw</em> body using <code>STRIPE_WEBHOOK_SECRET</code>. Signature verified before any JSON parse.</li>
+    </ul>
+    <h4>Idempotency</h4>
+    <p>
+      Stripe assigns each event an id. The handler does
+      <code>INSERT INTO webhook_events(source='stripe', external_id=event.id) ON CONFLICT DO NOTHING</code>
+      and exits early on conflict. <code>orders.stripe_checkout_session_id</code> also has a
+      <code>UNIQUE</code> constraint as a second line of defense. Stripe retries up to 3 days.
+    </p>
+  </div>
+
+  <div class="callout">
+    <strong>Worker compatibility note:</strong> the Stripe SDK is not used; we
+    call the REST API via <code>reqwest</code>. For signature verification we
+    compute HMAC-SHA256 ourselves with <code>ring</code> / RustCrypto, so the
+    server stays libc-clean.
+  </div>
+
+  <h2 id="shippo">Shippo — shipping &amp; tracking</h2>
+
+  <div class="card">
+    <h3>Three points of contact</h3>
+    <ol>
+      <li>
+        <strong>Rate quote at checkout</strong> (synchronous, user-visible)<br/>
+        <code>POST https://api.goshippo.com/shipments/</code>
+        — input: from = warehouse env vars, to = customer address, parcels =
+        computed weight + box dims. Output: <code>rates[]</code>, filtered to
+        2–3 service levels (USPS Priority, UPS Ground, expedited).
+      </li>
+      <li>
+        <strong>Label purchase</strong> (async, triggered by <code>checkout.session.completed</code>)<br/>
+        <code>POST /transactions</code> with the chosen <code>rate</code> +
+        <code>label_file_type: 'PDF_4x6'</code>. Stores
+        <code>shippo_transaction_id</code>, <code>tracking_number</code>,
+        <code>tracking_carrier</code>, <code>tracking_url</code> on the order.
+        PDF uploaded to object storage at <code>shipping-labels/{order_id}.pdf</code>.
+      </li>
+      <li>
+        <strong>Tracking webhook</strong> → <code>POST /api/v1/webhooks/shippo</code><br/>
+        Event of interest: <code>track_updated</code>. Maps
+        Shippo <code>tracking_status.status</code> →
+        our <code>orders.status</code>
+        (<code>PRE_TRANSIT</code> → no change, <code>TRANSIT</code> → shipped,
+        <code>DELIVERED</code> → delivered, <code>RETURNED</code>/<code>FAILURE</code> → admin alert).
+      </li>
+    </ol>
+    <h4>Authentication</h4>
+    <ul>
+      <li>Outbound: <code>SHIPPO_API_TOKEN</code> as bearer.</li>
+      <li>Inbound (webhooks): HMAC-SHA256 with <code>SHIPPO_WEBHOOK_SECRET</code> over raw body; constant-time compare via <code>crypto.subtle</code> equivalent.</li>
+    </ul>
+    <h4>Retry policy</h4>
+    <p>
+      Label purchase retries up to 3 times with exponential backoff
+      (1 s, 4 s, 16 s). After 3 failures the order is left
+      <code>fulfillment_status = 'unfulfilled'</code> and an
+      <code>LowStockAdminAlert</code>-style email is queued. Operator can
+      manually retry from the admin UI.
+    </p>
+  </div>
+
+  <h2 id="resend">Resend — transactional email</h2>
+
+  <div class="card">
+    <h3>Use</h3>
+    <p>
+      All transactional sends — order confirmation, shipping notification,
+      delivered follow-up, refund confirmation, low-stock admin alert. Templates
+      live in <code>src/emails/*.tsx</code> on the client side and are
+      pre-rendered to HTML at build time, then sent server-side.
+    </p>
+    <h4>Authentication</h4>
+    <p><code>RESEND_API_KEY</code> as bearer. From-address is configured by <code>RESEND_FROM_EMAIL</code>.</p>
+    <h4>Failure model</h4>
+    <p>
+      Emails are <em>not</em> in the critical checkout path. The webhook handler
+      enqueues the send; a failure is logged and surfaces in the
+      <code>stellaux_external_calls_total{service="resend",success="false"}</code>
+      counter, but the order is still considered successful.
+    </p>
+  </div>
+
+  <h2 id="supabase">Supabase — Postgres &amp; auth</h2>
+
+  <div class="card">
+    <h3>Primary datastore</h3>
+    <p>
+      Supabase (managed Postgres 16) is the application's
+      <strong>system of record</strong> for catalog, inventory, carts,
+      orders, customers, webhook events, and the audit log. The Rust API
+      connects via SeaORM over <code>sqlx-postgres</code> + rustls — no
+      libpq, no Supabase client SDK on the server side.
+    </p>
+    <h4>Why Postgres (vs. a document store like Firestore)</h4>
+    <ul>
+      <li><strong>Relational joins.</strong> Catalog ↔ variants ↔ inventory ↔ channel listings is a four-way join we run on every product detail load; SQL is the natural fit.</li>
+      <li><strong>Analytics.</strong> The Phase 4 AI analytics agent runs sales-trend queries directly in SQL — no nested-document gymnastics.</li>
+      <li><strong>Transactions.</strong> Inventory reservation + order creation must be atomic. Postgres gives us this for free with row-level locks and advisory locks.</li>
+      <li><strong>Portability.</strong> Standard Postgres — we can move off Supabase to any managed Postgres provider without code changes.</li>
+    </ul>
+    <h4>Supabase-specific features we use</h4>
+    <ul>
+      <li><strong>Auth</strong> — optional JWKS-verified JWT (see next section).</li>
+      <li><strong>Realtime</strong> — published on a per-table basis (Phase 3 internal dashboard, see <a href="internal-tools.html#realtime">Internal Tools</a>).</li>
+      <li><strong>Row-level security policies</strong> — deny-by-default on public business tables unless an explicit policy is added later.</li>
+      <li><strong>PITR + nightly backups</strong> — see <a href="deployment.html#dr">Deployment → DR</a>.</li>
+    </ul>
+    <h4>Connection</h4>
+    <pre><code>DATABASE_URL=postgres://…@db.&lt;project&gt;.supabase.co:5432/postgres
+DATABASE_POOL_SIZE=10</code></pre>
+    <p>The Rust API should use the direct Postgres connection on <code>:5432</code> or a session-compatible pooler introduced deliberately later. Do not use transaction-mode pooling for SeaORM/sqlx prepared-statement workloads.</p>
+    <h4>Schema exposure posture</h4>
+    <ul>
+      <li><strong><code>public</code> is not automatically public data.</strong> Supabase PostgREST can see the schema, so every business table there must have explicit RLS posture.</li>
+      <li><strong><code>private</code> holds internal operational tables.</strong> Inventory, reconciliation, and other internal-only records should live outside PostgREST-facing defaults.</li>
+      <li><strong>The Rust API remains the primary business interface.</strong> Direct Supabase client access is an explicit exception, not the baseline.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Auth modes</h3>
+    <p>
+      The codebase supports two auth modes:
+    </p>
+    <ul>
+      <li>
+        <strong>First-party</strong> — passwords stored Argon2-hashed in our
+        <code>users</code> table; JWTs signed with <code>JWT_SECRET</code>
+        (HS256), TTL <code>JWT_EXPIRY_SECONDS</code>.
+      </li>
+      <li>
+        <strong>Supabase-issued JWT</strong> — if <code>SUPABASE_JWKS_URL</code>
+        is set, the server fetches keys from Supabase's JWKS endpoint, caches
+        them in <code>JwksCache</code> (TTL = <code>JWKS_TTL_SECONDS</code>),
+        and validates tokens against the cached key set.
+      </li>
+    </ul>
+    <p>
+      The two modes can coexist: the auth extractor tries the local HS256 key
+      first and falls back to JWKS RS256 verification if a <code>kid</code> is
+      present in the header.
+    </p>
+  </div>
+
+  <h2 id="storage">Supabase Storage — product images</h2>
+
+  <div class="card">
+    <p>
+      Product images are stored in Supabase Storage and accessed through the
+      backend storage contract. Postgres stores image metadata and object keys;
+      Supabase Storage holds the file bytes.
+    </p>
+    <p>
+      The application contract stays the same regardless of provider details:
+      store only object keys and metadata in Postgres, and resolve public URLs
+      through backend configuration rather than hard-coding vendor paths.
+    </p>
+  </div>
+
+  <h2 id="marketplaces">Etsy &amp; eBay — sales channels</h2>
+
+  <div class="card">
+    <p>
+      Marketplaces are designed for from day one but the connector code is
+      explicitly deferred. The data model carries them:
+    </p>
+    <ul>
+      <li><code>channel_listings(variant_id, channel, external_listing_id, sync_status)</code></li>
+      <li><code>orders.source</code> ∈ {<code>website</code>, <code>etsy</code>, <code>ebay</code>}</li>
+      <li><code>orders.external_order_id</code> for non-website sources</li>
+      <li><code>inventory_adjustments.channel</code> for channel-attributed deltas</li>
+    </ul>
+    <h4>Phased build</h4>
+    <table>
+      <thead><tr><th>Phase</th><th>Behavior</th><th>Effort</th></tr></thead>
+      <tbody>
+        <tr><td>v1 (today)</td><td>Manual sync — admin records marketplace orders and reconciles inventory by hand</td><td>0</td></tr>
+        <tr><td>v2</td><td>One-way push: cron every 15 min reads inventory deltas, pushes to Etsy <code>updateInventory</code> + eBay <code>reviseInventoryStatus</code></td><td>~2 weeks</td></tr>
+        <tr><td>v3</td><td>Bidirectional: marketplace order webhooks insert into <code>orders</code>; decrement inventory regardless of source</td><td>~3 weeks</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="cloudflare">Cloudflare — Workers, DNS, CDN</h2>
+
+  <div class="card">
+    <p>
+      The storefront deploys to Cloudflare Workers via the
+      <code>@cloudflare/vite-plugin</code> (config in
+      <code>client/wrangler.jsonc</code>). Cloudflare gives us:
+    </p>
+    <ul>
+      <li><strong>Workers</strong> for SSR — global edge, sub-50 ms TTFB targets.</li>
+      <li><strong>CDN</strong> for static assets — automatic.</li>
+      <li><strong>R2</strong> (optional) — object storage with no egress fees.</li>
+      <li><strong>DNS</strong> — with proxied records so origin IPs aren't exposed.</li>
+      <li><strong>Cron Triggers</strong> (future v2) — drives marketplace sync.</li>
+    </ul>
+    <p>
+      The Rust API does <em>not</em> run on Workers; it runs on a container host
+      (Fly.io / Railway / a VM). Workers proxy auth/cart/checkout calls or the
+      browser hits the API directly via CORS — see
+      <a href="deployment.html">Deployment</a>.
+    </p>
+  </div>
+
+  <h2 id="failure-modes">Failure modes &amp; recovery</h2>
+
+  <table>
+    <thead>
+      <tr><th>Service</th><th>If it's down</th><th>What still works</th><th>Recovery</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Stripe API</td>
+        <td>Checkout button errors; no new orders</td>
+        <td>Browsing, account, admin</td>
+        <td>Stripe outages are rare and short; surface a clear "payments temporarily unavailable" banner; no data action needed.</td>
+      </tr>
+      <tr>
+        <td>Stripe webhooks</td>
+        <td>Orders stall in "paid, not recorded" state</td>
+        <td>Customer already has a Stripe receipt</td>
+        <td>Stripe retries up to 3 days; on resolution the handler runs idempotently. Replay manually from the Stripe dashboard if needed.</td>
+      </tr>
+      <tr>
+        <td>Shippo rate API</td>
+        <td>Checkout cannot show shipping options</td>
+        <td>Cart, browsing</td>
+        <td>Show fallback flat-rate shipping; allow checkout to proceed; label purchased later.</td>
+      </tr>
+      <tr>
+        <td>Shippo label purchase</td>
+        <td>Order is paid but unlabeled</td>
+        <td>Everything else</td>
+        <td>Auto-retry 3× with backoff; admin alert; manual retry button in admin UI.</td>
+      </tr>
+      <tr>
+        <td>Resend</td>
+        <td>Customers don't receive emails</td>
+        <td>Orders, payments, fulfillment</td>
+        <td>Email job marked failed in metrics; can be replayed from <code>webhook_events</code> log; no data loss.</td>
+      </tr>
+      <tr>
+        <td>Object storage</td>
+        <td>New image upload fails; label PDF not retrievable</td>
+        <td>Catalog browsing (cached CDN), checkout</td>
+        <td>Buy label and store metadata even if PDF upload fails; retry PDF push later.</td>
+      </tr>
+      <tr>
+        <td>Postgres</td>
+        <td>Hard outage — full downtime</td>
+        <td>Nothing dynamic</td>
+        <td>This is the single largest dependency; managed-Postgres SLA + PITR + daily logical backup off-site.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="secrets">Secrets inventory</h2>
+
+  <div class="card">
+    <p>Set in <code>.env</code> for local dev, in the container host's secret manager (Fly secrets / Railway variables) for prod, and in <code>wrangler secret put</code> for Workers-side keys.</p>
+    <pre><code># Database
+DATABASE_URL
+DATABASE_POOL_SIZE
+
+# Auth
+JWT_SECRET                  # HS256 signer for first-party tokens
+JWT_EXPIRY_SECONDS
+SUPABASE_JWKS_URL           # optional; enables Supabase JWT validation
+JWKS_TTL_SECONDS
+
+# Stripe
+STRIPE_SECRET_KEY
+STRIPE_WEBHOOK_SECRET
+STRIPE_SUCCESS_URL
+STRIPE_CANCEL_URL
+
+# Shippo
+SHIPPO_API_TOKEN
+SHIPPO_WEBHOOK_SECRET
+
+# Resend
+RESEND_API_KEY
+RESEND_FROM_EMAIL
+
+# Warehouse origin (for Shippo rate quotes)
+WAREHOUSE_NAME / STREET / CITY / STATE / POSTAL_CODE / COUNTRY / PHONE
+
+# Object storage
+STORAGE_BACKEND             # 'local' | 's3'
+STORAGE_LOCAL_PATH          # if local
+STORAGE_PUBLIC_URL
+STORAGE_S3_BUCKET / ENDPOINT / REGION / ACCESS_KEY_ID / SECRET_ACCESS_KEY  # if s3
+
+# Server
+SERVER_HOST, SERVER_PORT
+CORS_ORIGINS                # comma-separated allowlist
+RUST_LOG                    # tracing filter, e.g. info,stellaux_server=debug</code></pre>
+  </div>
+
+  <div class="callout callout--warn">
+    <strong>Rotation cadence:</strong> Stripe + Shippo + Resend keys rotate
+    yearly. <code>JWT_SECRET</code> rotation requires staggered double-validation
+    (keep old key valid for one TTL window) — not yet implemented; plan before
+    first rotation.
+  </div>
+
+</main>
+
+<footer class="site-footer">
+  <div class="meta">External Services · drafted 2026-05-28</div>
+</footer>
+
+</body>
+</html>

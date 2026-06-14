@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Future Scaling — Architecture</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="site-header__inner">
+    <div class="brand">The Polished Standard <small>· Architecture</small></div>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <a href="external-services.html">External Services</a>
+      <a href="endpoints.html">API Endpoints</a>
+      <a href="endpoints-rest.html">REST Reference</a>
+      <a href="internal-tools.html">Internal Tools</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="observability.html">Observability</a>
+      <a class="is-active" href="scaling.html">Future Scaling</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <header class="page-header">
+    <h1>Future Scaling Suggestions</h1>
+    <p class="subtitle">
+      Where the current design will bend first, and the cheapest next move at
+      each stage. Read top-to-bottom: each section assumes the previous ones
+      are in place.
+    </p>
+  </header>
+
+  <div class="callout">
+    <strong>Premise:</strong> the v1 stack — one Rust API instance + managed
+    Postgres + Cloudflare Workers storefront — should comfortably carry
+    <strong>tens of thousands of orders/month</strong> without any of the
+    changes below. Most of this page is "what to do <em>when</em>", not
+    "what to do <em>now</em>". Resist building ahead of the load.
+  </div>
+
+  <div class="toc">
+    <strong>On this page</strong>
+    <ol>
+      <li><a href="#stages">Growth stages &amp; cheapest next move</a></li>
+      <li><a href="#bottlenecks">Likely bottlenecks (in order)</a></li>
+      <li><a href="#api-layer">API layer scaling</a></li>
+      <li><a href="#db-layer">Database scaling</a></li>
+      <li><a href="#assets">Assets &amp; CDN</a></li>
+      <li><a href="#async">Background work &amp; queues</a></li>
+      <li><a href="#search">Catalog search</a></li>
+      <li><a href="#multi-region">Multi-region considerations</a></li>
+      <li><a href="#cost">Cost shape at each stage</a></li>
+      <li><a href="#team">Team &amp; tooling scaling</a></li>
+    </ol>
+  </div>
+
+  <h2 id="stages">Growth stages &amp; cheapest next move</h2>
+
+  <table>
+    <thead>
+      <tr><th>Stage</th><th>Signal</th><th>Cheapest next move</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>S1 · 0–1K orders/mo</td>
+        <td>Launch volume</td>
+        <td>Stay on v1. One API instance, managed Postgres starter tier, Workers free plan.</td>
+      </tr>
+      <tr>
+        <td>S2 · 1K–10K orders/mo</td>
+        <td>Single instance shows occasional p95 spikes during peaks</td>
+        <td>Run <strong>2 API instances</strong> behind the LB; bump Postgres to a small dedicated tier. No code changes.</td>
+      </tr>
+      <tr>
+        <td>S3 · 10K–50K orders/mo</td>
+        <td>Webhook delivery occasionally times out; admin queries are slow</td>
+        <td>Add a <strong>read replica</strong> for admin/BI reads; move webhook processing to a background queue. Add Redis for cart / rate limiting / locks.</td>
+      </tr>
+      <tr>
+        <td>S4 · 50K–200K orders/mo</td>
+        <td>Postgres CPU dominates; product-page tail latency rises</td>
+        <td>Introduce a <strong>cache layer</strong> for catalog (Redis or KV); horizontally scale API to 4–8 instances. Start sharding hot tables (e.g. <code>webhook_events</code>) by time.</td>
+      </tr>
+      <tr>
+        <td>S5 · 200K+ orders/mo</td>
+        <td>Single-region Postgres is the global bottleneck</td>
+        <td>Split read traffic across regional replicas; carve out search into Meilisearch/Typesense; serve images and label PDFs entirely from R2 + CDN. Consider a separate inventory service if SKU count &gt; 50K.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="bottlenecks">Likely bottlenecks (in order)</h2>
+
+  <ol>
+    <li><strong>Postgres CPU on hot reads</strong> — catalog browsing dominates traffic; fix with caching and a read replica.</li>
+    <li><strong>Stripe webhook handler latency</strong> — synchronous DB writes per event. Move to background queue once consistently &gt; 1 RPS.</li>
+    <li><strong>Inventory contention on hot SKUs</strong> — advisory locks serialize checkouts on a single SKU. Becomes visible during flash sales / featured drops.</li>
+    <li><strong>Object storage upload throughput</strong> — only relevant during bulk catalog imports.</li>
+    <li><strong>Outbound external latency</strong> — Shippo rate quotes are ~500–800 ms. Hide with skeleton UI; cache identical rate queries for a short TTL.</li>
+  </ol>
+
+  <h2 id="api-layer">API layer scaling</h2>
+
+  <div class="card">
+    <h3>Horizontal scaling — the easy part</h3>
+    <p>
+      The Rust API is stateless modulo the DB pool. Adding instances is a
+      config change on the host. Three things to watch:
+    </p>
+    <ul>
+      <li>
+        <strong>DB pool sizing.</strong>
+        Total connections across instances must stay below the Postgres
+        <code>max_connections</code>. With 2 instances at
+        <code>DATABASE_POOL_SIZE=10</code> you're at 20; the starter Postgres
+        tier allows ~100. Either raise it as you scale instances, or front
+        with PgBouncer.
+      </li>
+      <li>
+        <strong>Migration races on rolling deploys.</strong>
+        SeaORM's migration advisory lock prevents two instances from racing;
+        confirmed safe but verify after every migration in staging.
+      </li>
+      <li>
+        <strong>In-memory state.</strong>
+        Today only the JWKS cache is in-memory. If you ever add idempotency
+        keys, rate-limit counters, or short-lived locks, externalize them
+        (Redis) — don't replicate them in process.
+      </li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>PgBouncer (transaction-pooled) at S3+</h3>
+    <p>
+      Drop a PgBouncer instance between the API and Postgres in
+      session-compatible pooling mode. Avoid transaction-mode pooling for the
+      long-lived Rust API because SeaORM/sqlx rely on prepared statements.
+      Session-compatible pooling lets you scale to many short-lived API
+      instances without exhausting Postgres connection slots. Cost: ~$5/mo
+      for a 256 MB VM; pays for itself the first time you'd otherwise need to
+      bump Postgres a tier just for connections.
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>Backpressure &amp; rate limiting</h3>
+    <p>
+      <code>tower-http</code> already provides <code>RequestBodyLimit</code>,
+      <code>Timeout</code>, and <code>CatchPanic</code>. Two things to add as
+      load grows:
+    </p>
+    <ul>
+      <li><strong>Per-IP rate limit</strong> on auth + cart routes (<code>tower-governor</code>) backed by Redis at S3+.</li>
+      <li><strong>Adaptive concurrency limit</strong> on the DB pool side — surface 503 before the pool deadlocks.</li>
+    </ul>
+  </div>
+
+  <h2 id="db-layer">Database scaling</h2>
+
+  <div class="card">
+    <h3>Vertical first, replicas next, sharding last</h3>
+    <ol>
+      <li>
+        <strong>Vertical scaling</strong> carries you through S3.
+        Going from a 1 vCPU / 2 GB starter tier to 4 vCPU / 16 GB usually
+        4–8× capacity for 4× the cost. No code change.
+      </li>
+      <li>
+        <strong>Read replica</strong> at S3. Two consumers:
+        <ul>
+          <li><em>Admin / BI queries</em> — long-running, must not block the storefront. Point Metabase + admin reports at the replica.</li>
+          <li><em>Catalog reads</em> — only after caching has been exhausted. Route by feature flag at first to validate consistency.</li>
+        </ul>
+      </li>
+      <li>
+        <strong>Sharding</strong> is the last resort. <code>webhook_events</code>
+        is the table that grows fastest; partition by month
+        (<code>received_at</code>) once it crosses ~50 M rows. Detach &amp;
+        archive old partitions to S3 in Parquet.
+      </li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h3>Index hygiene</h3>
+    <ul>
+      <li>Add <code>pg_stat_statements</code> from day one; review the top 20 by total time monthly.</li>
+      <li>For new indexes after launch, always use <code>CREATE INDEX CONCURRENTLY</code>.</li>
+      <li>Hot indexes today: <code>orders(source, external_order_id)</code>, <code>orders(tracking_number)</code> (partial), <code>webhook_events(source, external_id)</code>. Don't add more until <code>EXPLAIN</code> says otherwise.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Hot SKU contention</h3>
+    <p>
+      Inventory reservation uses an advisory lock per <code>variant_id</code>.
+      On a featured drop, that variant is a single-threaded bottleneck. Two
+      remedies, in order:
+    </p>
+    <ol>
+      <li><strong>Skip the lock for variants with on_hand &gt; 1000</strong> — most SKUs.</li>
+      <li><strong>Bucketed counters</strong> for ultra-hot SKUs: split a SKU's stock into N buckets, lock a random bucket, fall back to the next on contention. Adds complexity; only do this if you actually see waits.</li>
+    </ol>
+  </div>
+
+  <h2 id="assets">Assets &amp; CDN</h2>
+
+  <div class="card">
+    <h3>Default at all stages: R2 + Cloudflare CDN</h3>
+    <p>
+      Product images and label PDFs go to Cloudflare R2 with the public
+      bucket fronted by CDN cache. Egress is free, which matters once a
+      product page is being pulled by 10K browsers a day.
+    </p>
+    <h4>S2+ improvements</h4>
+    <ul>
+      <li><strong>Image optimization at the edge</strong> — Cloudflare Images or a Workers image-resize handler for responsive variants. Keeps originals in R2.</li>
+      <li><strong>Aggressive cache headers</strong> — <code>Cache-Control: public, max-age=31536000, immutable</code> on hashed asset URLs.</li>
+      <li><strong>Stale-while-revalidate</strong> on catalog API responses via Workers KV / Cache API — buys 80% of the benefit of a Redis catalog cache without operating a Redis.</li>
+    </ul>
+  </div>
+
+  <h2 id="async">Background work &amp; queues</h2>
+
+  <div class="card">
+    <h3>S1–S2 — inline is fine</h3>
+    <p>
+      Today, Stripe webhook handlers do everything synchronously
+      (insert order, decrement inventory, trigger Shippo label, queue email).
+      For up to a few orders/min this is the simplest correct design.
+    </p>
+    <h3>S3+ — split the webhook</h3>
+    <p>
+      Once webhook bursts cause &gt; 1 s end-to-end on
+      <code>checkout.session.completed</code>, change the shape:
+    </p>
+    <ol>
+      <li>Webhook handler verifies signature, inserts into <code>webhook_events</code>, returns 200 immediately. (Already idempotent.)</li>
+      <li>Background worker (one extra binary, same crate) reads pending events and processes them.</li>
+    </ol>
+    <p>Two implementation options, in order of preference:</p>
+    <ul>
+      <li><strong>Postgres-as-queue</strong> (<a href="https://github.com/rafaelcaricio/pgqueueing">pgqueueing</a> / <a href="https://github.com/rafaelcaricio/sqlxmq">sqlxmq</a>) — keeps the dependency surface flat, transactional with the rest of the data. Works through S4.</li>
+      <li><strong>Redis Streams</strong> via <code>fred</code> or <code>bb8-redis</code> — adopt if you already have Redis for caching/locks at S4+.</li>
+    </ul>
+    <h3>Cron-triggered jobs</h3>
+    <p>Marketplace inventory push (Section 6 v2 of the design doc) is the first cron. Run it from Cloudflare Cron Triggers hitting an admin endpoint, or from a tiny <code>cron</code> binary on the API host.</p>
+  </div>
+
+  <h2 id="search">Catalog search</h2>
+
+  <div class="card">
+    <h3>S1–S3 — Postgres full-text is enough</h3>
+    <p>
+      Add a <code>tsvector</code> column to <code>products</code> with a
+      trigger that updates on name / description / collection changes.
+      GIN index on it; rank with <code>ts_rank_cd</code>. Covers
+      ~10K SKUs effortlessly.
+    </p>
+    <h3>S4+ — Meilisearch / Typesense</h3>
+    <p>
+      Once you need typo tolerance, faceting on materials/sizes/price ranges,
+      and "related products" by vector similarity, host a Meilisearch
+      instance (or use Typesense Cloud). Index changes are pushed from a
+      background job triggered by <code>products</code> /
+      <code>product_variants</code> writes. Postgres remains the truth.
+    </p>
+  </div>
+
+  <h2 id="multi-region">Multi-region considerations</h2>
+
+  <div class="card">
+    <p>
+      The storefront is already multi-region (Workers run on Cloudflare's
+      global edge). The API server is single-region until volume justifies
+      otherwise.
+    </p>
+    <h4>When to go multi-region for the API</h4>
+    <ul>
+      <li>≥ 25 % of orders from a different continent than the API region</li>
+      <li>P95 transcontinental latency &gt; 400 ms despite Workers in front</li>
+      <li>Regulatory data-residency request (EU customer data in EU)</li>
+    </ul>
+    <h4>What that looks like</h4>
+    <ul>
+      <li>Primary Postgres in one region, read replicas in others. Writes always go to primary.</li>
+      <li>API instances per region, talking to local replica for reads, primary for writes.</li>
+      <li>Webhooks land in any region but funnel writes to the primary; rely on idempotency.</li>
+    </ul>
+    <p>
+      This is a meaningful step-up in operational complexity. Don't do it on
+      principle — do it when the latency or compliance metric demands it.
+    </p>
+  </div>
+
+  <h2 id="cost">Cost shape at each stage</h2>
+
+  <div class="card">
+    <p>Rough monthly run-rate, excluding transaction fees:</p>
+    <table>
+      <thead>
+        <tr><th>Stage</th><th>API</th><th>DB</th><th>CDN/assets</th><th>Misc</th><th>Total</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>S1</td><td>$0–$10 (1 small VM)</td><td>$0–$25</td><td>$0 (CF free)</td><td>~$25 email</td><td>~$50</td></tr>
+        <tr><td>S2</td><td>~$30 (2 small)</td><td>~$50</td><td>~$5</td><td>~$25</td><td>~$110</td></tr>
+        <tr><td>S3</td><td>~$80</td><td>~$200 (+ replica)</td><td>~$15</td><td>~$50 (Redis, search)</td><td>~$345</td></tr>
+        <tr><td>S4</td><td>~$200</td><td>~$600</td><td>~$50</td><td>~$150</td><td>~$1,000</td></tr>
+        <tr><td>S5</td><td>~$500</td><td>~$2,000+</td><td>~$200</td><td>~$500</td><td>~$3,000+</td></tr>
+      </tbody>
+    </table>
+    <p>
+      At S5 you should be doing ~$1M+ GMV/month for those numbers to feel
+      small; if they don't, that's the signal to revisit per-instance
+      efficiency before scaling further.
+    </p>
+  </div>
+
+  <h2 id="team">Team &amp; tooling scaling</h2>
+
+  <div class="card">
+    <ul>
+      <li><strong>Solo / 1 eng</strong> — current setup. <code>cargo</code> + <code>npm</code> + Docker; deploys via Wrangler / Fly CLI. Memory &gt; ceremony.</li>
+      <li><strong>2–3 eng</strong> — add a PR template, mandatory CI checks, branch protection, and an on-call rotation (even if it's just two people swapping weeks).</li>
+      <li><strong>4+ eng</strong> — adopt a feature-flag service (Unleash self-host, or GrowthBook). Carve the codebase into clearer ownership boundaries: <code>domain/cart</code>, <code>domain/checkout</code>, etc. — already structured for this.</li>
+      <li><strong>Customer-facing on-call</strong> — once you have non-engineer ops, build the admin UI search/filter UX before any new feature. They will save you 10× their own time.</li>
+    </ul>
+  </div>
+
+  <div class="callout callout--warn">
+    <strong>What not to do early.</strong> Don't split into microservices; don't
+    adopt Kubernetes; don't write a custom orchestrator; don't move catalog into
+    an "Event Sourcing" system. Each is a credible answer to a real problem you
+    do not have yet, and each will cost more than it returns at S1–S3.
+  </div>
+
+</main>
+
+<footer class="site-footer">
+  <div class="meta">Future Scaling · drafted 2026-05-28</div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Architecture — The Polished Standard</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="site-header__inner">
+    <div class="brand">The Polished Standard <small>· Architecture</small></div>
+    <nav class="nav">
+      <a class="is-active" href="index.html">Overview</a>
+      <a href="external-services.html">External Services</a>
+      <a href="endpoints.html">API Endpoints</a>
+      <a href="endpoints-rest.html">REST Reference</a>
+      <a href="internal-tools.html">Internal Tools</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="observability.html">Observability</a>
+      <a href="scaling.html">Future Scaling</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <section class="hero">
+    <h1>Architecture Overview</h1>
+    <p>
+      A self-hosted commerce stack: a TanStack Start storefront in front of a
+      Rust (Axum + SeaORM) API, with Postgres as the single source of truth and
+      Stripe, Shippo, and Resend handling payments, shipping, and email.
+      Designed to coexist with Etsy and eBay as parallel sales channels.
+    </p>
+  </section>
+
+  <div class="grid">
+    <a class="card-link" href="external-services.html">
+      <h3>External Services →</h3>
+      <p>The third-party APIs and platform dependencies the application uses: Stripe, Shippo, Resend, Supabase Postgres/Auth/Storage, and the marketplaces.</p>
+    </a>
+    <a class="card-link" href="deployment.html">
+      <h3>Deployment Strategy →</h3>
+      <p>How code goes from a developer laptop to production — Docker, Cloudflare Workers, container hosts, migrations, and rollback.</p>
+    </a>
+    <a class="card-link" href="observability.html">
+      <h3>Observability →</h3>
+      <p>Structured logs, Prometheus metrics, OpenTelemetry tracing, request IDs, and SLOs we plan to watch.</p>
+    </a>
+    <a class="card-link" href="scaling.html">
+      <h3>Future Scaling →</h3>
+      <p>Where the current design will bend first, and the cheapest next move at each stage — from 1K to 1M orders.</p>
+    </a>
+  </div>
+
+  <h2>System at a glance</h2>
+
+  <pre class="diagram">
+   ┌─────────────────────────────────────────────────────────────┐
+   │   Browser (TanStack Start storefront, Cloudflare Workers)   │
+   └────────┬────────────────────────────────────────────────────┘
+            │  HTTPS / JSON
+            ▼
+   ┌─────────────────────────────────────────────────────────────┐
+   │   stellaux_server (Rust · Axum · SeaORM)                    │
+   │   /api/v1/{catalog, craft, auth, cart, checkout, account,   │
+   │           admin, webhooks}                                  │
+   └────────┬──────────────┬─────────────┬──────────────┬────────┘
+            │              │             │              │
+            ▼              ▼             ▼              ▼
+      ┌──────────┐  ┌────────────┐  ┌──────────┐  ┌──────────┐
+      │ Postgres │  │  Stripe    │  │  Shippo  │  │  Resend  │
+      │ (truth)  │  │ Checkout/  │  │  Labels/ │  │  Email   │
+      │          │  │ Webhooks   │  │ Tracking │  │          │
+      └──────────┘  └────────────┘  └──────────┘  └──────────┘
+                          │             │
+                          └──webhooks───┘
+                                │
+                                ▼
+                   POST /api/v1/webhooks/{stripe,shippo}
+                   (signature-verified, idempotent on
+                    webhook_events(source, external_id))
+  </pre>
+
+  <h2>Component map</h2>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Layer</th>
+        <th>Implementation</th>
+        <th>Source of truth for…</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Storefront UI</td>
+        <td>TanStack Start (React 19, Vite), Radix UI primitives, Tailwind v4. Deployed to Cloudflare Workers via <code>@cloudflare/vite-plugin</code>.</td>
+        <td>Presentation only.</td>
+      </tr>
+      <tr>
+        <td>API server</td>
+        <td>Rust 2024 edition, Axum 0.8 on Tokio, SeaORM 1.1 (rustls + sqlx-postgres). One static binary; <code>tower-http</code> middleware stack.</td>
+        <td>Business logic, authorization, idempotency.</td>
+      </tr>
+      <tr>
+        <td>Database</td>
+        <td><strong>Supabase Postgres</strong> 16 (managed). SeaORM migrations tracked in <code>seaql_migrations</code>; applied at process boot before <code>axum::serve</code>. Supabase Realtime channels are used by the internal dashboard (Phase 3) on a per-table basis.</td>
+        <td>Catalog, inventory, carts, orders, customers, webhook log, audit log.</td>
+      </tr>
+      <tr>
+        <td>Object storage</td>
+        <td><strong>Supabase Storage</strong> for product-image binaries, accessed through the backend storage contract. Postgres remains the owner of image metadata and relationships.</td>
+        <td>Product-image binaries and related catalog display assets.</td>
+      </tr>
+      <tr>
+        <td>Auth</td>
+        <td>JWT (<code>jsonwebtoken</code>) signed by the server, or Supabase JWTs validated via JWKS cache. Argon2 for password storage.</td>
+        <td>Session tokens; user records live in Postgres.</td>
+      </tr>
+      <tr>
+        <td>Payments</td>
+        <td>Stripe Checkout Sessions; webhook handler at <code>/api/v1/webhooks/stripe</code> verifies signature on the raw body.</td>
+        <td>Stripe is authoritative for payment state, mirrored to Postgres.</td>
+      </tr>
+      <tr>
+        <td>Shipping</td>
+        <td>Shippo: rate quotes at checkout, label purchase post-payment, tracking via webhook.</td>
+        <td>Shippo is authoritative for tracking, mirrored to Postgres.</td>
+      </tr>
+      <tr>
+        <td>Email</td>
+        <td>Resend, called from the API server. Templates planned in <code>react-email</code> compiled at build time.</td>
+        <td>Transactional sends only; no marketing list in v1.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Request lifecycle</h2>
+
+  <div class="card">
+    <h3>1 · Edge ingress</h3>
+    <p>
+      Storefront pages render on Cloudflare Workers (TanStack Start SSR). Server
+      functions and API calls from the browser hit the Rust API directly over
+      HTTPS — Workers do not proxy data-plane requests in steady state.
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>2 · Middleware stack (<code>tower-http</code>)</h3>
+    <p>Every request flows through, in order:</p>
+    <ul>
+      <li><code>SetRequestIdLayer</code> / <code>PropagateRequestIdLayer</code> — UUID per request, echoed on <code>x-request-id</code>.</li>
+      <li><code>SensitiveRequestHeadersLayer</code> — strips <code>Authorization</code>, <code>Cookie</code> from logs.</li>
+      <li><code>TraceLayer</code> — span per request, recorded by <code>tracing</code>.</li>
+      <li><code>PrometheusMetricLayer</code> — HTTP duration histograms, status counters.</li>
+      <li><code>CorsLayer</code> — allowlisted origins from <code>CORS_ORIGINS</code>.</li>
+      <li><code>CompressionLayer</code> + <code>DecompressionLayer</code> — gzip on response/request.</li>
+      <li><code>RequestBodyLimitLayer</code> — normal 1 MB; webhooks get a larger limit.</li>
+      <li><code>TimeoutLayer</code> — per-route configurable, default ~15 s.</li>
+      <li><code>CatchPanicLayer</code> — 500 with request id, panic logged with stack.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>3 · Route groups</h3>
+    <table>
+      <thead>
+        <tr><th>Group</th><th>Auth</th><th>Routes</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>public</code></td><td>none</td><td>catalog, craft, auth, healthz, readyz, metrics</td></tr>
+        <tr><td><code>webhooks</code></td><td>signature</td><td>Stripe, Shippo (raw body, larger limit)</td></tr>
+        <tr><td><code>protected</code></td><td>JWT</td><td>cart, checkout, account</td></tr>
+        <tr><td><code>admin</code></td><td>JWT + <code>role == admin</code></td><td>admin CRUD, channel sync</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3>4 · Database access</h3>
+    <p>
+      SeaORM connection pool sized via <code>DATABASE_POOL_SIZE</code> (default 10).
+      All entities live under <code>src/entity/</code>; domain logic in
+      <code>src/domain/{catalog,cart,checkout,...}.rs</code>. Mutations that affect
+      inventory run inside transactions with row-level locks
+      (<code>SELECT … FOR UPDATE</code>) or Postgres advisory locks for hot SKUs.
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>5 · External calls</h3>
+    <p>
+      A single <code>reqwest</code> client (rustls, http2, brotli) is built once
+      at boot and shared across Stripe, Shippo, and Resend clients. Each
+      outbound call records latency + success to
+      <code>stellaux_external_call_duration_ms</code>.
+    </p>
+  </div>
+
+  <h2>Source layout</h2>
+
+  <pre class="diagram">
+the-polished-standard/
+├── client/                       TanStack Start storefront
+│   ├── src/routes/               file-based routes (shop, craft, checkout, …)
+│   ├── src/components/           UI + shadcn-derived primitives
+│   ├── src/integrations/         supabase, lovable
+│   └── wrangler.jsonc            Cloudflare Workers config
+├── stellaux_server/              Rust API
+│   ├── src/
+│   │   ├── main.rs               entrypoint → bootstrap::init → server::run
+│   │   ├── server.rs             router build, middleware, graceful shutdown
+│   │   ├── common/               cross-cutting concerns
+│   │   │   ├── bootstrap.rs      tracing + config + DB + http + storage init
+│   │   │   ├── config.rs         env-driven Config struct
+│   │   │   ├── app_state.rs      shared Arc-wrapped state
+│   │   │   ├── auth.rs           JWT extractors, require_auth / require_admin
+│   │   │   ├── jwt.rs            JWKS cache for Supabase tokens
+│   │   │   ├── storage.rs        storage abstraction for Supabase Storage / local dev
+│   │   │   ├── metrics.rs        business-metric descriptors & helpers
+│   │   │   └── opentelemetry.rs  opt-in OTLP exporter wiring
+│   │   ├── domain/               one module per bounded context
+│   │   │   ├── catalog.rs · craft.rs · cart.rs · checkout.rs
+│   │   │   ├── auth.rs · account.rs · admin.rs · webhooks.rs
+│   │   ├── entity/               SeaORM entities (mirrors public schema)
+│   │   └── migration/            sea-orm-migration modules
+│   ├── Cargo.toml
+│   └── Dockerfile
+├── docker-compose.yml            local stack: postgres + server + client
+├── docs/
+│   ├── backend_integration.md    canonical design doc (this is its companion)
+│   ├── API_Guidelines.md
+│   └── architecture/             ← you are here
+└── migration/ · inventory_management/ · tests/
+  </pre>
+
+  <h2>Design principles</h2>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Supabase Postgres is the truth</h3>
+      <p>Stripe, Shippo, and the marketplaces are authoritative for their own state, but everything is mirrored into Supabase Postgres so the admin UI and audit trail need only one query. We picked Postgres over a document store (Firestore) deliberately — relational joins, SQL-driven analytics, and the Phase 4 AI analytics agent all work better against a real RDBMS.</p>
+    </div>
+    <div class="card">
+      <h3>Idempotency is a table</h3>
+      <p><code>webhook_events(source, external_id)</code> is a unique key. Every webhook does <code>INSERT … ON CONFLICT DO NOTHING</code> first, processes, then sets <code>processed_at</code>. Replays are free.</p>
+    </div>
+    <div class="card">
+      <h3>One binary, one image</h3>
+      <p>The API ships as a single static Rust binary in a distroless-style image. No Node, no libpq, no runtime DLL hunt.</p>
+    </div>
+    <div class="card">
+      <h3>Boundaries, not layers</h3>
+      <p>Code is organized by domain (catalog, cart, checkout, …) rather than by technical layer. Each module owns its DTOs, handlers, and queries.</p>
+    </div>
+    <div class="card">
+      <h3>Edge-compatible by default</h3>
+      <p>External SDK calls use <code>reqwest</code> with rustls — no Node-only crypto or libpq — so the same code paths can later move into a Worker if useful.</p>
+    </div>
+    <div class="card">
+      <h3>Recurring cost = transaction cost</h3>
+      <p>We pay Stripe per transaction, Shippo per label, Postgres for storage. No per-seat SaaS in the critical path.</p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>See also:</strong> the canonical design doc lives at
+    <code>docs/backend_integration.md</code>. These pages are the architectural
+    summary; the design doc is the contract.
+  </div>
+
+</main>
+
+<footer class="site-footer">
+  <div class="meta">stellaux_server · the-polished-standard · drafted 2026-05-28</div>
+</footer>
+
+</body>
+</html>

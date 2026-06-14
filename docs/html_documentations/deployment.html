@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Deployment Strategy — Architecture</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="site-header__inner">
+    <div class="brand">The Polished Standard <small>· Architecture</small></div>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <a href="external-services.html">External Services</a>
+      <a href="endpoints.html">API Endpoints</a>
+      <a href="endpoints-rest.html">REST Reference</a>
+      <a href="internal-tools.html">Internal Tools</a>
+      <a class="is-active" href="deployment.html">Deployment</a>
+      <a href="observability.html">Observability</a>
+      <a href="scaling.html">Future Scaling</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <header class="page-header">
+    <h1>Deployment Strategy</h1>
+    <p class="subtitle">
+      How the storefront and API get to production, how migrations run, how
+      secrets are managed, and how we roll forward (and back) safely.
+    </p>
+  </header>
+
+  <div class="toc">
+    <strong>On this page</strong>
+    <ol>
+      <li><a href="#environments">Environments</a></li>
+      <li><a href="#topology">Production topology</a></li>
+      <li><a href="#pipeline">CI/CD pipeline</a></li>
+      <li><a href="#api">API server deployment</a></li>
+      <li><a href="#storefront">Storefront deployment</a></li>
+      <li><a href="#migrations">Database migrations</a></li>
+      <li><a href="#secrets">Configuration &amp; secrets</a></li>
+      <li><a href="#release">Release process</a></li>
+      <li><a href="#rollback">Rollback</a></li>
+      <li><a href="#dr">Backups &amp; disaster recovery</a></li>
+    </ol>
+  </div>
+
+  <h2 id="environments">Environments</h2>
+
+  <table>
+    <thead>
+      <tr><th>Env</th><th>Purpose</th><th>Storefront</th><th>API</th><th>Database</th><th>External services</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>local</code></td>
+        <td>Developer laptop</td>
+        <td>Vite dev (<code>:3000</code>)</td>
+        <td><code>cargo run</code> or Compose (<code>:8080</code>)</td>
+        <td>Postgres in Docker</td>
+        <td>Stripe/Shippo test mode</td>
+      </tr>
+      <tr>
+        <td><code>staging</code></td>
+        <td>Pre-prod QA</td>
+        <td>Workers preview (<code>*.workers.dev</code>)</td>
+        <td>Container host, separate app</td>
+        <td>Separate managed Postgres</td>
+        <td>Stripe/Shippo test mode</td>
+      </tr>
+      <tr>
+        <td><code>production</code></td>
+        <td>Customers</td>
+        <td>Workers, custom domain</td>
+        <td>Container host, multi-instance</td>
+        <td>Managed Postgres + PITR</td>
+        <td>Live keys</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <strong>Hard rule:</strong> staging and production share <em>no</em>
+    credentials. A leaked staging Stripe key cannot bill a real customer.
+  </div>
+
+  <h2 id="topology">Production topology</h2>
+
+  <pre class="diagram">
+                 ┌────────────────────────────────────┐
+   end user ───▶ │  Cloudflare (DNS · CDN · Workers)  │
+                 └───────┬────────────────────┬───────┘
+                         │ SSR / static       │ /api/* (CORS)
+                         ▼                    ▼
+              ┌──────────────────┐    ┌────────────────────────┐
+              │  Storefront      │    │  API: stellaux_server  │
+              │  (TanStack on    │    │  Container host:       │
+              │   Workers)       │    │   Fly.io / Railway /   │
+              │                  │    │   bare VM behind Caddy │
+              └──────────────────┘    │  2+ instances · :8080  │
+                                       └────────┬───────┬───────┘
+                                                │       │
+                                                ▼       ▼
+                                        ┌──────────┐  ┌──────────┐
+                                        │ Postgres │  │  R2/S3   │
+                                        │ (mgd.)   │  │ (assets) │
+                                        └──────────┘  └──────────┘
+
+         Stripe → POST  https://api.example.com/api/v1/webhooks/stripe
+         Shippo → POST  https://api.example.com/api/v1/webhooks/shippo
+  </pre>
+
+  <h2 id="pipeline">CI/CD pipeline</h2>
+
+  <p>
+    Documented under <a href="../CI">docs/CI/</a> (filled in alongside the
+    GitHub Actions workflow). High-level stages:
+  </p>
+
+  <pre class="diagram">
+   commit ──▶ lint ──▶ test ──▶ build images ──▶ deploy staging ──┐
+                                                                  ▼
+                                                       smoke tests (cypress/k6)
+                                                                  │
+                                                                  ▼
+                                            tag <code>vX.Y.Z</code> ──▶ promote to prod
+  </pre>
+
+  <h4>Per-PR (every push)</h4>
+  <ul>
+    <li><code>cargo fmt --check</code> + <code>cargo clippy -- -D warnings</code></li>
+    <li><code>cargo test --workspace</code> (DB-backed tests against ephemeral Postgres service)</li>
+    <li><code>npm run lint</code>, <code>npm run build</code> on the storefront</li>
+    <li>Trivy / cargo-audit scan on dependencies</li>
+  </ul>
+
+  <h4>On merge to <code>main</code></h4>
+  <ul>
+    <li>Build + push the Rust API container to GHCR with two tags: <code>main-&lt;sha&gt;</code> and <code>main</code></li>
+    <li>Build the storefront via <code>wrangler deploy --env staging</code></li>
+    <li>Deploy API to staging (rolling)</li>
+    <li>Run e2e smoke (login → add to cart → Stripe test checkout → webhook → order row exists)</li>
+  </ul>
+
+  <h4>On tag <code>v*</code></h4>
+  <ul>
+    <li>Promote the exact same image SHA to production (no rebuild)</li>
+    <li><code>wrangler deploy --env production</code> for the storefront</li>
+    <li>Run post-deploy probe against <code>/readyz</code> and <code>/metrics</code></li>
+  </ul>
+
+  <h2 id="api">API server deployment</h2>
+
+  <div class="card">
+    <h3>Container image</h3>
+    <p>
+      Built from <code>stellaux_server/Dockerfile</code>. Multi-stage:
+    </p>
+    <ol>
+      <li><strong>builder</strong>: <code>rust:1.84</code> base, <code>cargo build --release --locked</code>, LTO thin, single codegen unit, symbols stripped.</li>
+      <li><strong>runtime</strong>: distroless or <code>debian:bookworm-slim</code> + CA certs. Binary at <code>/usr/local/bin/stellaux_server</code>. Non-root user. ~30 MB final image.</li>
+    </ol>
+    <h4>Why Rust + static binary</h4>
+    <ul>
+      <li>No libpq — <code>sqlx-postgres</code> + rustls — image stays clean.</li>
+      <li>Startup &lt; 200 ms; suits rolling restarts without warmup pain.</li>
+      <li>Memory footprint &lt; 50 MB idle, fits 256 MB instance comfortably.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Host options (any one)</h3>
+    <table>
+      <thead><tr><th>Host</th><th>Why pick it</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Fly.io</td>
+          <td>Simplest path; multi-region, free-ish for small loads, manages TLS</td>
+          <td>Native rolling deploys; secrets via <code>fly secrets set</code>.</td>
+        </tr>
+        <tr>
+          <td>Railway / Render</td>
+          <td>One-click container deploy; managed Postgres in same project</td>
+          <td>Beware bandwidth pricing if asset egress is heavy — use R2 + CDN.</td>
+        </tr>
+        <tr>
+          <td>Hetzner / DO + Caddy</td>
+          <td>Cheapest at small scale; full control</td>
+          <td>You own backups, OS patches, log rotation. Use systemd unit or docker-compose.</td>
+        </tr>
+        <tr>
+          <td>Kubernetes (ECS, GKE, …)</td>
+          <td>Only if multi-service infra already exists</td>
+          <td>Overkill for v1; revisit at the scaling thresholds in <a href="scaling.html">Future Scaling</a>.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3>Health gates</h3>
+    <ul>
+      <li><code>GET /healthz</code> — liveness; returns 200 if the process is up. No DB check.</li>
+      <li><code>GET /readyz</code> — readiness; pings DB, fails if pool exhausted or DB unreachable. Load balancer routes traffic only when this returns 200.</li>
+      <li><code>GET /metrics</code> — Prometheus scrape; not exposed publicly in prod (firewall to monitoring network).</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Rolling deploys</h3>
+    <ol>
+      <li>New version pulls image, starts, applies migrations on boot (no-op if none pending — sea-orm tracks state in <code>seaql_migrations</code>).</li>
+      <li><code>/readyz</code> passes → host adds instance to LB.</li>
+      <li>Old instance drained: stops accepting new requests, completes in-flight (Axum graceful shutdown on SIGTERM, controlled by <code>shutdown_signal()</code> in <code>server.rs</code>).</li>
+      <li>Loop until all instances replaced. Two instances minimum so this is non-disruptive.</li>
+    </ol>
+  </div>
+
+  <h2 id="storefront">Storefront deployment</h2>
+
+  <div class="card">
+    <p>
+      <code>client/</code> builds via Vite with <code>@cloudflare/vite-plugin</code>
+      and deploys to Cloudflare Workers using
+      <a href="https://developers.cloudflare.com/workers/wrangler/">Wrangler</a>.
+      Config in <code>client/wrangler.jsonc</code>.
+    </p>
+    <pre><code># local
+npm run dev                          # vite dev server, port 3000
+
+# build for Workers
+npm run build                        # outputs Worker bundle + static assets
+
+# deploy
+npx wrangler deploy --env staging
+npx wrangler deploy --env production</code></pre>
+    <p>
+      Public env vars (<code>VITE_*</code>) are baked into the bundle at build time.
+      Server-side env vars and secrets are configured per-environment in
+      <code>wrangler.jsonc</code> or via <code>wrangler secret put</code>.
+    </p>
+    <h4>API base URL</h4>
+    <p>
+      The browser talks to the API at a CORS-allowlisted public URL
+      (e.g. <code>https://api.example.com</code>). The Worker may also proxy
+      certain routes for first-party cookies / origin parity.
+    </p>
+  </div>
+
+  <h2 id="migrations">Database migrations</h2>
+
+  <div class="card">
+    <p>
+      Authored as <code>sea-orm-migration</code> modules under
+      <code>stellaux_server/src/migration/</code>. State is tracked in the
+      <code>seaql_migrations</code> table managed by <code>MigratorTrait</code>.
+    </p>
+    <h4>When migrations run</h4>
+    <p>
+      On every process boot, <code>bootstrap::init</code> calls
+      <code>Migrator::up(&amp;db, None)</code> before
+      <code>axum::serve</code> binds. Pending migrations apply; if none, no-op.
+      <strong>Outcome:</strong> there is never a moment when the API serves
+      traffic against an older schema than it was compiled for.
+    </p>
+    <h4>Rules of the road</h4>
+    <ul>
+      <li><strong>Additive only.</strong> Adding a column with a default is safe online; renaming or dropping is not. Drops happen as two-deploy migrations (deploy ignore-the-column code, then drop).</li>
+      <li><strong>Index creation</strong> uses <code>CONCURRENTLY</code> for tables &gt; 1 M rows.</li>
+      <li><strong>Backfills</strong> outside migrations, via a CLI job (<code>src/bin/backfill_*.rs</code>) using batched updates with progress logging.</li>
+      <li><strong>No data deletes in migrations.</strong> One-way doors are run manually with eyes on.</li>
+      <li><strong>Idempotency:</strong> SeaORM tracks applied set; manual edits to <code>seaql_migrations</code> are forbidden.</li>
+    </ul>
+  </div>
+
+  <div class="callout callout--warn">
+    <strong>Multi-instance gotcha:</strong> with N instances rolling, two may
+    momentarily try to migrate at once on boot. SeaORM holds an advisory lock
+    during <code>Migrator::up</code>, so only one wins; the others wait, then
+    see no pending work. Verify on the staging deploy after each migration is
+    added.
+  </div>
+
+  <h2 id="secrets">Configuration &amp; secrets</h2>
+
+  <div class="card">
+    <p>
+      Config loads via the <code>config</code> crate plus <code>dotenvy</code> in
+      dev. The full <code>Config</code> struct lives in
+      <code>src/common/config.rs</code>. All values are env-driven; there is no
+      <code>config.yaml</code> in production.
+    </p>
+    <table>
+      <thead><tr><th>Env</th><th>Where secrets live</th></tr></thead>
+      <tbody>
+        <tr><td>local</td><td><code>.env</code> (gitignored)</td></tr>
+        <tr><td>staging / prod (API)</td><td>Host's secret store: <code>fly secrets</code>, Railway variables, or <code>systemd</code> EnvironmentFile <code>0600</code> root-only</td></tr>
+        <tr><td>storefront</td><td><code>wrangler secret put</code> per environment</td></tr>
+      </tbody>
+    </table>
+    <p>The full inventory is on the <a href="external-services.html#secrets">External Services</a> page.</p>
+  </div>
+
+  <h2 id="release">Release process</h2>
+
+  <ol>
+    <li><strong>Cut a release branch</strong> or merge to <code>main</code>; CI builds + pushes image.</li>
+    <li><strong>Auto-deploy to staging</strong>; smoke tests run.</li>
+    <li><strong>Soak time</strong> — minimum 30 min on staging before promoting. Watch error rate and order success rate on dashboards (see <a href="observability.html">Observability</a>).</li>
+    <li><strong>Tag</strong> <code>vX.Y.Z</code> to trigger prod promotion. Same image, no rebuild.</li>
+    <li><strong>Post-deploy probe</strong> hits <code>/readyz</code>, then a synthetic <code>checkout.session.completed</code> webhook in test mode against staging — confirms the handler path didn't regress.</li>
+    <li><strong>Announce</strong> in the team channel with the image SHA and migration list.</li>
+  </ol>
+
+  <h4>Soft launch sequence (initial production)</h4>
+  <ol>
+    <li>Day 0 — deploy backend, internal test orders only (real Stripe live, refunded immediately).</li>
+    <li>Day 1–3 — friends &amp; family, real shipping to 3–5 addresses.</li>
+    <li>Day 4 — enable for all visitors.</li>
+  </ol>
+
+  <h2 id="rollback">Rollback</h2>
+
+  <div class="card">
+    <p><strong>Storefront</strong> — <code>wrangler rollback &lt;version-id&gt;</code>. Atomic; takes seconds.</p>
+    <p><strong>API</strong> — re-deploy the previous image tag. Two scenarios:</p>
+    <ul>
+      <li>
+        <strong>No migration in the new release</strong> → straightforward
+        rollback to the previous image SHA. Rolling restart restores it.
+      </li>
+      <li>
+        <strong>Additive migration in the new release</strong> → safe to roll
+        back code (the older binary ignores the new column). Drop the column
+        later in a planned cleanup migration.
+      </li>
+      <li>
+        <strong>Destructive migration (rename/drop)</strong> → cannot roll
+        forward in place. This is why drops are two-deploy: the first deploy
+        stops reading the column, the second deploy drops it. The first deploy
+        is rollback-safe; the second isn't and requires a PITR restore.
+      </li>
+    </ul>
+    <p><strong>Database</strong> — PITR via the managed Postgres provider
+      (covered next section). Rollbacks of data are last-resort; preferred
+      remediation is a forward-fix migration.</p>
+  </div>
+
+  <h2 id="dr">Backups &amp; disaster recovery</h2>
+
+  <div class="card">
+    <h3>Postgres</h3>
+    <ul>
+      <li>Managed provider's PITR (typically 7–35 days depending on plan) — restore to any timestamp within window.</li>
+      <li>Nightly <code>pg_dump</code> to a separate cloud account / bucket as a defense against provider-account compromise.</li>
+      <li>Weekly <em>restore drill</em> in staging — restore last night's dump into a scratch DB and run <code>SELECT count(*)</code> sanity checks. The drill is the only thing that proves backups work.</li>
+    </ul>
+    <h3>Object storage</h3>
+    <ul>
+      <li>R2 / S3 versioning enabled on the bucket; lifecycle rule removes old versions after 30 days.</li>
+      <li>Cross-region replication for label PDFs (compliance) — not for product images (CDN-cached, regenerable).</li>
+    </ul>
+    <h3>Targets</h3>
+    <table>
+      <thead><tr><th>Failure</th><th>RTO</th><th>RPO</th></tr></thead>
+      <tbody>
+        <tr><td>API instance crash</td><td>&lt; 30 s</td><td>0</td></tr>
+        <tr><td>Container host outage</td><td>&lt; 10 min (failover)</td><td>0</td></tr>
+        <tr><td>Postgres node failure</td><td>&lt; 5 min (managed HA failover)</td><td>0</td></tr>
+        <tr><td>Postgres logical corruption</td><td>&lt; 1 hr (PITR)</td><td>&lt; 5 min (WAL)</td></tr>
+        <tr><td>Provider-account compromise</td><td>&lt; 24 hr (restore from off-account dump)</td><td>&lt; 24 hr</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <strong>The deploy is the cheapest part.</strong> Most failures we will
+    actually hit are app-level (a bug in a webhook handler, a missed
+    null-check). Investment goes into idempotency, request-id tracing, and
+    replayable webhook logs — covered in <a href="observability.html">Observability</a>.
+  </div>
+
+</main>
+
+<footer class="site-footer">
+  <div class="meta">Deployment Strategy · drafted 2026-05-28</div>
+</footer>
+
+</body>
+</html>

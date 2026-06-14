@@ -1,0 +1,848 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>REST API Reference — Architecture</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="site-header__inner">
+    <div class="brand">The Polished Standard <small>· Architecture</small></div>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <a href="external-services.html">External Services</a>
+      <a href="endpoints.html">API Endpoints</a>
+      <a class="is-active" href="endpoints-rest.html">REST Reference</a>
+      <a href="internal-tools.html">Internal Tools</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="observability.html">Observability</a>
+      <a href="scaling.html">Future Scaling</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <header class="page-header">
+    <h1>REST API Reference <span class="pill pill--live">v1</span></h1>
+    <p class="subtitle">
+      All public + protected + admin endpoints exposed by
+      <code>stellaux_server</code>. Pick a category on the left; details on
+      the right. The interactive Swagger UI at <code>/docs</code> is the
+      runtime contract — this page is the architectural reference.
+    </p>
+  </header>
+
+  <div class="docs-shell">
+
+    <aside class="docs-sidebar">
+      <h4>System</h4>
+      <ul>
+        <li><a href="#system">Health &amp; metrics</a></li>
+      </ul>
+      <h4>Public</h4>
+      <ul>
+        <li><a href="#catalog">Catalog</a></li>
+        <li><a href="#craft">Craft builder</a></li>
+        <li><a href="#auth">Authentication</a></li>
+      </ul>
+      <h4>Webhooks</h4>
+      <ul>
+        <li><a href="#webhooks">Stripe &amp; Shippo</a></li>
+      </ul>
+      <h4>Protected (JWT)</h4>
+      <ul>
+        <li><a href="#cart">Cart</a></li>
+        <li><a href="#checkout">Checkout</a></li>
+        <li><a href="#account">Account</a></li>
+      </ul>
+      <h4>Admin (JWT + role)</h4>
+      <ul>
+        <li><a href="#admin-orders">Orders</a></li>
+        <li><a href="#admin-products">Products</a></li>
+        <li><a href="#admin-inventory">Inventory</a></li>
+        <li><a href="#admin-craft">Craft compatibility</a></li>
+        <li><a href="#admin-channels">Channel listings</a></li>
+      </ul>
+    </aside>
+
+    <section class="docs-content">
+
+      <!-- ─── System / Default ─────────────────────────────────────── -->
+      <article id="system" class="docs-section is-default">
+        <h2>Health &amp; metrics</h2>
+        <p>Operational endpoints used by the load balancer and the monitoring stack. Not for client use.</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--get">GET</span>
+            <span class="endpoint__path">/healthz</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Purpose</h5>
+            <p>Liveness probe. Returns 200 if the process is up. No DB call.</p>
+            <h5>Response 200</h5>
+            <pre><code>{ "status": "ok" }</code></pre>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--get">GET</span>
+            <span class="endpoint__path">/readyz</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Purpose</h5>
+            <p>Readiness probe. Pings the database; returns 503 if Postgres is unreachable or the pool is exhausted. The LB routes traffic only when this returns 200.</p>
+            <h5>Response 200</h5>
+            <pre><code>{ "status": "ready", "db": "ok" }</code></pre>
+            <h5>Response 503</h5>
+            <pre><code>{ "status": "not_ready", "db": "unreachable" }</code></pre>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--get">GET</span>
+            <span class="endpoint__path">/metrics</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Purpose</h5>
+            <p>Prometheus exposition format. In production, this route is firewalled to the monitoring network — not exposed publicly.</p>
+            <h5>Sample</h5>
+            <pre><code># HELP stellaux_orders_total Total orders placed.
+# TYPE stellaux_orders_total counter
+stellaux_orders_total{source="website"} 142
+http_requests_total{method="GET",endpoint="/api/v1/catalog/products",status="200"} 8401</code></pre>
+            <p>Full metric inventory in <a href="observability.html#metrics">Observability → Metrics</a>.</p>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Catalog ──────────────────────────────────────────────── -->
+      <article id="catalog" class="docs-section">
+        <h2>Catalog <span class="pill pill--live">public</span></h2>
+        <p>Public and anonymous-readable through the Rust API. Backed by Supabase Postgres catalog tables that remain RLS-protected in the database layer. CDN-cacheable for ~60 s.</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--get">GET</span>
+            <span class="endpoint__path">/api/v1/catalog/products</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Description</h5>
+            <p>List active products with their variants and primary image. Supports filter + pagination.</p>
+            <h5>Query parameters</h5>
+            <table class="param-table">
+              <thead><tr><th>Name</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+              <tbody>
+                <tr><td><code>collection</code></td><td>string</td><td><span class="opt">opt</span></td><td>Filter by collection slug (e.g. <code>vol-i</code>).</td></tr>
+                <tr><td><code>category</code></td><td>string</td><td><span class="opt">opt</span></td><td><code>rings</code> | <code>necklaces</code> | <code>earrings</code> | <code>bracelets</code></td></tr>
+                <tr><td><code>material</code></td><td>string</td><td><span class="opt">opt</span></td><td>e.g. <code>18k-gold</code>, <code>vermeil</code>.</td></tr>
+                <tr><td><code>sort</code></td><td>enum</td><td><code>popularity</code></td><td><code>popularity</code> | <code>price_asc</code> | <code>price_desc</code> | <code>newest</code></td></tr>
+                <tr><td><code>page</code></td><td>int</td><td><code>1</code></td><td>1-indexed.</td></tr>
+                <tr><td><code>per_page</code></td><td>int</td><td><code>20</code></td><td>Max 100.</td></tr>
+              </tbody>
+            </table>
+            <h5>Response 200</h5>
+            <pre><code>{
+  "items": [
+    {
+      "id": "uuid",
+      "handle": "halo-pendant",
+      "name": "Halo Pendant",
+      "collection": "Vol. I",
+      "category": "necklaces",
+      "material": "18k Gold",
+      "image_url": "https://cdn.example.com/…",
+      "min_price_cents": 12800,
+      "in_stock": true
+    }
+  ],
+  "page": 1, "per_page": 20, "total": 137
+}</code></pre>
+            <h5>Implementation</h5>
+            <ul>
+              <li>Handler: <code>domain::catalog::list_products</code> mounted at <code>/api/v1/catalog</code>.</li>
+              <li>Single query with <code>JOIN product_variants</code> + <code>LEFT JOIN inventory_levels</code>; <code>min_price_cents</code> = <code>MIN(price_cents)</code>.</li>
+              <li>Cache headers: <code>Cache-Control: public, s-maxage=60, stale-while-revalidate=300</code>.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--get">GET</span>
+            <span class="endpoint__path">/api/v1/catalog/products/{handle}</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Description</h5>
+            <p>Detail view for a single product. Returns all variants, all images (ordered by <code>position</code>), and current inventory per variant.</p>
+            <h5>Path parameters</h5>
+            <table class="param-table">
+              <thead><tr><th>Name</th><th>Type</th><th>Description</th></tr></thead>
+              <tbody>
+                <tr><td><code>handle</code></td><td>string <span class="req">req</span></td><td>URL slug.</td></tr>
+              </tbody>
+            </table>
+            <h5>Response 200 (excerpt)</h5>
+            <pre><code>{
+  "id": "uuid", "handle": "halo-pendant", "name": "Halo Pendant",
+  "description": "…", "collection": "Vol. I", "material": "18k Gold",
+  "craft_role": "accessory", "craft_base_type": "pendant",
+  "images": [ { "url": "…", "alt": "…", "position": 0 } ],
+  "variants": [
+    {
+      "id": "uuid", "sku": "HAL-PEND-S",
+      "size": "Small", "price_cents": 12800,
+      "weight_grams": 4, "dimensions_mm": { "l": 18, "w": 18, "h": 3 },
+      "available": 6
+    }
+  ]
+}</code></pre>
+            <h5>Response 404</h5>
+            <pre><code>{ "error": { "code": "PRODUCT_NOT_FOUND", "message": "…" } }</code></pre>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--get">GET</span>
+            <span class="endpoint__path">/api/v1/catalog/collections</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Description</h5>
+            <p>Distinct collection slugs + display names + product counts. Drives the storefront top nav.</p>
+            <h5>Response 200</h5>
+            <pre><code>[
+  { "slug": "vol-i",   "name": "Vol. I",   "product_count": 12 },
+  { "slug": "vol-ii",  "name": "Vol. II",  "product_count":  8 },
+  { "slug": "atelier", "name": "Atelier",  "product_count":  4 }
+]</code></pre>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--get">GET</span>
+            <span class="endpoint__path">/api/v1/catalog/categories</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Description</h5>
+            <p>Enumerated categories with counts; static set today, dynamic later.</p>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Craft ────────────────────────────────────────────────── -->
+      <article id="craft" class="docs-section">
+        <h2>Craft builder <span class="pill pill--live">public</span></h2>
+        <p>Drives the per-component compatibility UI for the build-your-own product. Reads <code>products</code> filtered by <code>craft_role</code> plus the <code>craft_compatibility</code> join table.</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--get">GET</span>
+            <span class="endpoint__path">/api/v1/craft/bases</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Description</h5>
+            <p>List products with <code>craft_role = 'base'</code>. Includes <code>craft_base_type</code> for grouping (pendant / chain / trunk).</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--get">GET</span>
+            <span class="endpoint__path">/api/v1/craft/accessories</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Description</h5>
+            <p>List products with <code>craft_role = 'accessory'</code>.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--get">GET</span>
+            <span class="endpoint__path">/api/v1/craft/compatibility/{base_handle}</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Description</h5>
+            <p>Return the list of accessory product ids compatible with a given base. The client uses this to gate accessory selection.</p>
+            <h5>Response 200</h5>
+            <pre><code>{ "base_handle": "trunk-base", "accessory_ids": ["uuid-a","uuid-b"] }</code></pre>
+            <h5>Implementation</h5>
+            <p>Single <code>SELECT accessory_product_id FROM craft_compatibility WHERE base_product_id = (SELECT id FROM products WHERE handle = $1)</code>. Cached aggressively (<code>s-maxage=300</code>) — admin compatibility edits purge the cache via tag.</p>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Auth ─────────────────────────────────────────────────── -->
+      <article id="auth" class="docs-section">
+        <h2>Authentication <span class="pill pill--live">public</span></h2>
+        <p>First-party email + password auth. Issues HS256 JWTs signed with <code>JWT_SECRET</code>, TTL <code>JWT_EXPIRY_SECONDS</code>. Supabase JWTs are also accepted on protected routes when <code>SUPABASE_JWKS_URL</code> is configured — see <a href="external-services.html#supabase">External Services</a>.</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--post">POST</span>
+            <span class="endpoint__path">/api/v1/auth/signup</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Request body</h5>
+            <table class="param-table">
+              <thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead>
+              <tbody>
+                <tr><td><code>email</code></td><td>string <span class="req">req</span></td><td>Lowercased server-side.</td></tr>
+                <tr><td><code>password</code></td><td>string <span class="req">req</span></td><td>Min 12 chars; hashed with Argon2id.</td></tr>
+                <tr><td><code>name</code></td><td>string</td><td>Display name.</td></tr>
+              </tbody>
+            </table>
+            <h5>Response 201</h5>
+            <pre><code>{ "user": { "id": "uuid", "email": "…" }, "access_token": "ey…", "expires_in": 3600 }</code></pre>
+            <h5>Errors</h5>
+            <ul>
+              <li><code>409 EMAIL_TAKEN</code> — unique constraint on <code>users.email</code>.</li>
+              <li><code>422 WEAK_PASSWORD</code> — validation failed.</li>
+            </ul>
+            <h5>Metrics</h5>
+            <p><code>stellaux_auth_events_total{kind="signup",success="true|false"}</code></p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--post">POST</span>
+            <span class="endpoint__path">/api/v1/auth/login</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Request body</h5>
+            <pre><code>{ "email": "…", "password": "…" }</code></pre>
+            <h5>Response 200</h5>
+            <pre><code>{ "access_token": "ey…", "expires_in": 3600, "user": { "id": "uuid", "email": "…" } }</code></pre>
+            <h5>Failure</h5>
+            <ul>
+              <li><code>401 INVALID_CREDENTIALS</code> — constant-time compare; same error for unknown email or bad password to avoid enumeration.</li>
+            </ul>
+            <h5>Rate limit</h5>
+            <p>Per-IP token bucket: 10 attempts / 5 min. Adopt Redis-backed limiter at S3 (see <a href="scaling.html#api-layer">Scaling</a>).</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--post">POST</span>
+            <span class="endpoint__path">/api/v1/auth/forgot-password</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Request body</h5>
+            <pre><code>{ "email": "…" }</code></pre>
+            <p>Always returns 200, regardless of whether the email exists, to prevent account enumeration. Sends a Resend email with a single-use token (TTL 30 min) when the account exists.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--post">POST</span>
+            <span class="endpoint__path">/api/v1/auth/reset-password</span>
+            <span class="endpoint__auth"><span class="badge">none</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Request body</h5>
+            <pre><code>{ "token": "…", "new_password": "…" }</code></pre>
+            <h5>Errors</h5>
+            <ul>
+              <li><code>400 TOKEN_EXPIRED</code> / <code>TOKEN_INVALID</code></li>
+              <li><code>422 WEAK_PASSWORD</code></li>
+            </ul>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Webhooks ─────────────────────────────────────────────── -->
+      <article id="webhooks" class="docs-section">
+        <h2>Webhooks <span class="pill pill--live">verified</span></h2>
+        <p>Public routes whose handlers verify HMAC signatures over the raw request body before any JSON parse. Idempotent on <code>(source, external_id)</code> via the <code>webhook_events</code> table — replays are safe.</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--post">POST</span>
+            <span class="endpoint__path">/api/v1/webhooks/stripe</span>
+            <span class="endpoint__auth"><span class="badge">HMAC sig</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Headers</h5>
+            <table class="param-table">
+              <tbody>
+                <tr><td><code>Stripe-Signature</code> <span class="req">req</span></td><td>HMAC over raw body using <code>STRIPE_WEBHOOK_SECRET</code>.</td></tr>
+                <tr><td><code>Content-Type</code></td><td><code>application/json</code></td></tr>
+              </tbody>
+            </table>
+            <h5>Body limit</h5>
+            <p>Webhook routes use the larger <code>webhook_body_limit_bytes</code> (default ~1 MB; Stripe payloads stay well under this).</p>
+            <h5>Events handled</h5>
+            <table class="param-table">
+              <thead><tr><th>Event</th><th>Action</th></tr></thead>
+              <tbody>
+                <tr><td><code>checkout.session.completed</code></td><td>Insert <code>orders</code> + <code>order_items</code>; decrement <code>inventory_levels.on_hand</code>; trigger Shippo label purchase; queue confirmation email.</td></tr>
+                <tr><td><code>checkout.session.expired</code></td><td>Release reserved inventory; mark cart <code>abandoned</code>.</td></tr>
+                <tr><td><code>payment_intent.payment_failed</code></td><td>Release reservations; log; no email.</td></tr>
+                <tr><td><code>charge.refunded</code></td><td>Set <code>orders.fulfillment_status = 'refunded'</code>; restock if pre-fulfillment; email customer.</td></tr>
+                <tr><td><code>charge.dispute.created</code></td><td>Admin alert email; no auto-refund.</td></tr>
+              </tbody>
+            </table>
+            <h5>Responses</h5>
+            <ul>
+              <li><code>200</code> — accepted (also returned for already-processed events).</li>
+              <li><code>400 INVALID_SIGNATURE</code> — body fails HMAC check.</li>
+              <li><code>500</code> — handler error; Stripe retries up to 3 days.</li>
+            </ul>
+            <h5>Implementation</h5>
+            <ol>
+              <li>Read raw body with <code>request.into_body().collect()</code>.</li>
+              <li>Verify signature in constant time.</li>
+              <li><code>INSERT INTO webhook_events(source='stripe', external_id=event.id, payload=…) ON CONFLICT DO NOTHING</code>.</li>
+              <li>Switch on event type; commit DB transaction.</li>
+              <li>Update <code>webhook_events.processed_at</code>.</li>
+            </ol>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--post">POST</span>
+            <span class="endpoint__path">/api/v1/webhooks/shippo</span>
+            <span class="endpoint__auth"><span class="badge">HMAC sig</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Headers</h5>
+            <table class="param-table">
+              <tbody>
+                <tr><td><code>X-Shippo-Signature</code> <span class="req">req</span></td><td>HMAC-SHA256 with <code>SHIPPO_WEBHOOK_SECRET</code> over raw body.</td></tr>
+              </tbody>
+            </table>
+            <h5>Events handled</h5>
+            <p><code>track_updated</code> — maps Shippo <code>tracking_status.status</code> to <code>orders.status</code> + updates <code>tracking_*</code> columns. On <code>DELIVERED</code>, queues a follow-up email scheduled for +3 days.</p>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Cart ─────────────────────────────────────────────────── -->
+      <article id="cart" class="docs-section">
+        <h2>Cart <span class="pill pill--live">protected</span></h2>
+        <p>JWT required. Anonymous carts identified by signed cookie <code>cart_token</code> are supported via the protected fallback path (the extractor accepts either a Bearer token or a verified anon-token cookie).</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--get">GET</span>
+            <span class="endpoint__path">/api/v1/cart</span>
+            <span class="endpoint__auth"><span class="badge">JWT or anon cookie</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Description</h5>
+            <p>Return the current cart with line items grouped by <code>assembly_id</code> (for Craft bundles). Lazily creates an empty cart on first call.</p>
+            <h5>Response 200</h5>
+            <pre><code>{
+  "cart_id": "uuid",
+  "currency": "USD",
+  "items": [
+    { "id": "uuid", "variant_id": "uuid", "sku": "HAL-PEND-S",
+      "qty": 1, "unit_price_cents": 12800,
+      "assembly_id": null, "assembly_role": null,
+      "product_name": "Halo Pendant", "image_url": "…" }
+  ],
+  "subtotal_cents": 12800
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--post">POST</span>
+            <span class="endpoint__path">/api/v1/cart/items</span>
+            <span class="endpoint__auth"><span class="badge">JWT or anon</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Request body</h5>
+            <table class="param-table">
+              <thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead>
+              <tbody>
+                <tr><td><code>variant_id</code></td><td>uuid <span class="req">req</span></td><td>FK to <code>product_variants</code>.</td></tr>
+                <tr><td><code>qty</code></td><td>int <span class="req">req</span></td><td>&gt; 0.</td></tr>
+                <tr><td><code>assembly_id</code></td><td>uuid</td><td>Groups Craft components in one purchase.</td></tr>
+                <tr><td><code>assembly_role</code></td><td>enum</td><td><code>base</code> | <code>accessory</code></td></tr>
+              </tbody>
+            </table>
+            <h5>Behavior</h5>
+            <ul>
+              <li>Validates <code>available &gt; 0</code> for the variant.</li>
+              <li>Snapshots <code>unit_price_cents</code> from <code>product_variants.price_cents</code> at insert time.</li>
+              <li>If a line for the same <code>(cart_id, variant_id, assembly_id)</code> exists, increments its <code>qty</code>.</li>
+            </ul>
+            <h5>Errors</h5>
+            <ul>
+              <li><code>409 INVENTORY_UNAVAILABLE</code> — variant out of stock.</li>
+              <li><code>404 VARIANT_NOT_FOUND</code></li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--patch">PATCH</span>
+            <span class="endpoint__path">/api/v1/cart/items/{item_id}</span>
+            <span class="endpoint__auth"><span class="badge">JWT or anon</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Request body</h5>
+            <pre><code>{ "qty": 2 }</code></pre>
+            <p><code>qty</code> must be &gt; 0; for removal, use <code>DELETE</code>.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--delete">DELETE</span>
+            <span class="endpoint__path">/api/v1/cart/items/{item_id}</span>
+            <span class="endpoint__auth"><span class="badge">JWT or anon</span></span>
+          </div>
+          <div class="endpoint__body">
+            <p>Remove a single line item. If the item is part of an assembly, also removes the sibling lines with the same <code>assembly_id</code>.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--delete">DELETE</span>
+            <span class="endpoint__path">/api/v1/cart</span>
+            <span class="endpoint__auth"><span class="badge">JWT or anon</span></span>
+          </div>
+          <div class="endpoint__body">
+            <p>Empty the cart (deletes all line items, keeps the cart row alive).</p>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Checkout ─────────────────────────────────────────────── -->
+      <article id="checkout" class="docs-section">
+        <h2>Checkout <span class="pill pill--live">protected</span></h2>
+        <p>Two-step flow: rate quote, then session creation. Inventory is reserved inside the session-creation transaction; reservations expire automatically on Stripe's <code>checkout.session.expired</code> webhook.</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--post">POST</span>
+            <span class="endpoint__path">/api/v1/checkout/shipping-rates</span>
+            <span class="endpoint__auth"><span class="badge">JWT</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Description</h5>
+            <p>Compute total weight + dims from the cart, call Shippo <code>POST /shipments</code>, and return 2–3 service-level rates.</p>
+            <h5>Request body</h5>
+            <pre><code>{
+  "cart_id": "uuid",
+  "address": {
+    "recipient": "Y. Aliyev",
+    "street": "…", "city": "…", "state": "CA",
+    "postal_code": "94110", "country": "US",
+    "phone": "+1-…"
+  }
+}</code></pre>
+            <h5>Response 200</h5>
+            <pre><code>{
+  "rates": [
+    { "shippo_rate_id": "…", "carrier": "USPS", "service": "Priority",
+      "amount_cents": 850, "estimated_days": 3 }
+  ]
+}</code></pre>
+            <h5>Errors</h5>
+            <ul>
+              <li><code>400 ADDRESS_INVALID</code> — Shippo flagged the address as undeliverable.</li>
+              <li><code>503 SHIPPO_UNAVAILABLE</code> — upstream timeout; client falls back to flat-rate.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head">
+            <span class="method method--post">POST</span>
+            <span class="endpoint__path">/api/v1/checkout/session</span>
+            <span class="endpoint__auth"><span class="badge">JWT</span></span>
+          </div>
+          <div class="endpoint__body">
+            <h5>Description</h5>
+            <p>Reserve inventory, create a Stripe Checkout Session, return the hosted URL. The browser redirects there.</p>
+            <h5>Request body</h5>
+            <pre><code>{ "cart_id": "uuid", "shippo_rate_id": "…", "address": { … } }</code></pre>
+            <h5>Response 200</h5>
+            <pre><code>{ "checkout_url": "https://checkout.stripe.com/c/pay/cs_test_…",
+  "session_id":   "cs_test_…",
+  "expires_at":   "2026-05-29T14:30:00Z" }</code></pre>
+            <h5>Implementation</h5>
+            <ol>
+              <li>Open Postgres tx; for each cart item run <code>SELECT … FOR UPDATE</code> on <code>inventory_levels</code> (advisory lock per <code>variant_id</code> for hot SKUs).</li>
+              <li><code>UPDATE inventory_levels SET reserved = reserved + qty</code>.</li>
+              <li>Call Stripe REST <code>POST /v1/checkout/sessions</code> with line items + shipping option + metadata.</li>
+              <li>Store <code>stripe_checkout_session_id</code> on the cart; commit.</li>
+            </ol>
+            <h5>Errors</h5>
+            <ul>
+              <li><code>409 INVENTORY_UNAVAILABLE</code> — a variant went out of stock between rate quote and session create.</li>
+              <li><code>502 STRIPE_UNAVAILABLE</code> — reservation rolled back.</li>
+            </ul>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Account ──────────────────────────────────────────────── -->
+      <article id="account" class="docs-section">
+        <h2>Account <span class="pill pill--live">protected</span></h2>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/account/me</span><span class="endpoint__auth"><span class="badge">JWT</span></span></div>
+          <div class="endpoint__body">
+            <p>Return the authenticated user: <code>id</code>, <code>email</code>, <code>name</code>, <code>created_at</code>, default address id, role.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--patch">PATCH</span><span class="endpoint__path">/api/v1/account/me</span><span class="endpoint__auth"><span class="badge">JWT</span></span></div>
+          <div class="endpoint__body">
+            <h5>Updatable fields</h5>
+            <ul><li><code>name</code></li><li><code>marketing_opt_in</code></li></ul>
+            <p>Email changes require a separate verified flow (out of v1 scope).</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/account/me/password</span><span class="endpoint__auth"><span class="badge">JWT</span></span></div>
+          <div class="endpoint__body">
+            <pre><code>{ "current_password": "…", "new_password": "…" }</code></pre>
+            <p>Verifies <code>current_password</code> before writing the new Argon2 hash. Logs an <code>audit_log</code> row.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/account/orders</span><span class="endpoint__auth"><span class="badge">JWT</span></span></div>
+          <div class="endpoint__body">
+            <p>List the user's orders, newest first. Supports <code>?page</code> + <code>?per_page</code>.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/account/orders/{order_id}</span><span class="endpoint__auth"><span class="badge">JWT</span></span></div>
+          <div class="endpoint__body">
+            <p>Order detail: line items, address, payment summary (<code>last4</code>, brand), tracking, status timeline.</p>
+            <h5>Authorization</h5>
+            <p>Row scoped to <code>orders.user_id = auth.uid</code>; 404 (not 403) if accessed by another user.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/account/addresses</span><span class="endpoint__auth"><span class="badge">JWT</span></span></div>
+          <div class="endpoint__body"><p>List saved addresses.</p></div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/account/addresses</span><span class="endpoint__auth"><span class="badge">JWT</span></span></div>
+          <div class="endpoint__body">
+            <h5>Body</h5>
+            <pre><code>{ "recipient":"…","street":"…","city":"…","state":"CA",
+  "postal_code":"94110","country":"US","phone":"+1-…",
+  "is_default": true }</code></pre>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--patch">PATCH</span><span class="endpoint__path">/api/v1/account/addresses/{id}</span><span class="endpoint__auth"><span class="badge">JWT</span></span></div>
+          <div class="endpoint__body"><p>Partial update. Setting <code>is_default: true</code> unsets it on the previous default in the same tx.</p></div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--delete">DELETE</span><span class="endpoint__path">/api/v1/account/addresses/{id}</span><span class="endpoint__auth"><span class="badge">JWT</span></span></div>
+          <div class="endpoint__body"><p>Soft-delete (<code>deleted_at</code>) so historical orders keep their shipping address intact.</p></div>
+        </div>
+      </article>
+
+      <!-- ─── Admin: Orders ────────────────────────────────────────── -->
+      <article id="admin-orders" class="docs-section">
+        <h2>Admin · Orders <span class="pill pill--internal">admin</span></h2>
+        <p>JWT + <code>role == 'admin'</code>. All mutating actions write an <code>audit_log</code> row.</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/admin/orders</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body">
+            <h5>Query params</h5>
+            <table class="param-table"><tbody>
+              <tr><td><code>status</code></td><td>enum <span class="opt">opt</span></td><td>paid / shipped / delivered / refunded / cancelled</td></tr>
+              <tr><td><code>source</code></td><td>enum <span class="opt">opt</span></td><td>website / etsy / ebay</td></tr>
+              <tr><td><code>from</code> / <code>to</code></td><td>ISO date <span class="opt">opt</span></td><td>Inclusive range on <code>created_at</code>.</td></tr>
+              <tr><td><code>tracking</code></td><td>string <span class="opt">opt</span></td><td>Exact <code>tracking_number</code> match.</td></tr>
+              <tr><td><code>page</code>, <code>per_page</code></td><td>int</td><td></td></tr>
+            </tbody></table>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/admin/orders/{order_id}</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body"><p>Full order detail: customer, line items with assembly grouping, addresses, payment summary, Shippo transaction id, label URL, audit log entries.</p></div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/admin/orders/{order_id}/refund</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body">
+            <h5>Body</h5>
+            <pre><code>{ "amount_cents": 12800, "reason": "customer_request" }</code></pre>
+            <p>Omit <code>amount_cents</code> for a full refund. Calls Stripe <code>POST /v1/refunds</code>; the actual state change waits for the <code>charge.refunded</code> webhook (idempotent).</p>
+            <h5>Metric</h5>
+            <p><code>stellaux_refunds_total{reason="customer_request"}</code></p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/admin/orders/{order_id}/cancel</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body"><p>Marks the order <code>cancelled</code>, releases reserved inventory if pre-fulfillment, voids the Shippo label if not yet handed to carrier.</p></div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/admin/orders/{order_id}/labels</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body"><p>Reprint or repurchase a shipping label. Stores the new PDF in object storage at <code>shipping-labels/{order_id}-{ts}.pdf</code>.</p></div>
+        </div>
+      </article>
+
+      <!-- ─── Admin: Products ──────────────────────────────────────── -->
+      <article id="admin-products" class="docs-section">
+        <h2>Admin · Products <span class="pill pill--internal">admin</span></h2>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/admin/products</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body"><p>Like the public catalog list, plus <code>status='draft'|'archived'</code> rows and admin-only fields (<code>craft_role</code>, <code>updated_at</code>, last actor).</p></div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/admin/products</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body">
+            <h5>Body (excerpt)</h5>
+            <pre><code>{ "handle":"new-pendant","name":"…","collection":"Vol. II",
+  "category":"necklaces","material":"18k Gold","status":"draft",
+  "craft_role":"accessory","craft_base_type":"pendant",
+  "variants":[ { "sku":"NP-S","size":"Small","price_cents":15000,
+                  "weight_grams":5,"dimensions_mm":{"l":18,"w":18,"h":3} } ] }</code></pre>
+            <p><code>handle</code> uniqueness enforced by DB constraint; 409 on conflict.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--patch">PATCH</span><span class="endpoint__path">/api/v1/admin/products/{product_id}</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body"><p>Partial update. Variants are managed via this same endpoint by passing a <code>variants</code> array — server diffs against existing rows.</p></div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--delete">DELETE</span><span class="endpoint__path">/api/v1/admin/products/{product_id}</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body"><p>Archive (sets <code>status='archived'</code>) — never hard-deletes, to preserve order history references.</p></div>
+        </div>
+      </article>
+
+      <!-- ─── Admin: Inventory ─────────────────────────────────────── -->
+      <article id="admin-inventory" class="docs-section">
+        <h2>Admin · Inventory <span class="pill pill--internal">admin</span></h2>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/admin/inventory</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body">
+            <h5>Query</h5>
+            <table class="param-table"><tbody>
+              <tr><td><code>low_stock_threshold</code></td><td>int <span class="opt">opt</span></td><td>If set, only returns variants with <code>available &lt;= threshold</code>.</td></tr>
+              <tr><td><code>handle</code></td><td>string <span class="opt">opt</span></td><td>Filter by parent product handle.</td></tr>
+            </tbody></table>
+            <h5>Response</h5>
+            <pre><code>[ { "variant_id":"uuid","sku":"…","on_hand":12,"reserved":2,"available":10,
+    "updated_at":"…" } ]</code></pre>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/admin/inventory</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body">
+            <h5>Body</h5>
+            <pre><code>{ "variant_id":"uuid",
+  "delta": 12,
+  "reason": "restock",
+  "channel": "website",
+  "notes": "Vendor PO #4421" }</code></pre>
+            <p>Reasons: <code>restock</code> | <code>shrinkage</code> | <code>return</code> | <code>manual</code> | <code>channel_sync</code>.</p>
+            <h5>Behavior</h5>
+            <ul>
+              <li>Transactional: writes both <code>inventory_adjustments</code> (audit) and <code>inventory_levels.on_hand</code>.</li>
+              <li>Refuses to take <code>on_hand</code> below 0; returns <code>422 INVENTORY_UNDERFLOW</code>.</li>
+              <li>Emits <code>stellaux_inventory_adjustments_total</code> + per-direction counter.</li>
+            </ul>
+          </div>
+        </div>
+      </article>
+
+      <!-- ─── Admin: Craft compatibility ───────────────────────────── -->
+      <article id="admin-craft" class="docs-section">
+        <h2>Admin · Craft compatibility <span class="pill pill--internal">admin</span></h2>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/admin/craft-compatibility</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body"><p>Full <code>craft_compatibility</code> table joined with product names — drives the editing matrix.</p></div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--post">POST</span><span class="endpoint__path">/api/v1/admin/craft-compatibility</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body">
+            <pre><code>{ "base_product_id":"uuid","accessory_product_id":"uuid" }</code></pre>
+            <p><code>UPSERT</code>; no-op if the pair already exists.</p>
+          </div>
+        </div>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--delete">DELETE</span><span class="endpoint__path">/api/v1/admin/craft-compatibility/{base_id}/{accessory_id}</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body"><p>Remove a compatibility pair. Purges the CDN cache for <code>/api/v1/craft/compatibility/{base_handle}</code>.</p></div>
+        </div>
+      </article>
+
+      <!-- ─── Admin: Channel listings ──────────────────────────────── -->
+      <article id="admin-channels" class="docs-section">
+        <h2>Admin · Channel listings <span class="pill pill--internal">admin</span></h2>
+        <p>Read-only in v1. Connector worker will fill in <code>last_synced_at</code> and <code>sync_status</code>.</p>
+
+        <div class="endpoint">
+          <div class="endpoint__head"><span class="method method--get">GET</span><span class="endpoint__path">/api/v1/admin/channel-listings</span><span class="endpoint__auth"><span class="badge">admin</span></span></div>
+          <div class="endpoint__body">
+            <h5>Query</h5>
+            <table class="param-table"><tbody>
+              <tr><td><code>channel</code></td><td>enum</td><td><code>etsy</code> | <code>ebay</code></td></tr>
+              <tr><td><code>sync_status</code></td><td>enum</td><td><code>ok</code> | <code>pending</code> | <code>error</code></td></tr>
+            </tbody></table>
+          </div>
+        </div>
+      </article>
+
+    </section>
+  </div>
+
+</main>
+
+<footer class="site-footer">
+  <div class="meta">REST API Reference · drafted 2026-05-28 · matches <code>src/domain/*::routes()</code></div>
+</footer>
+
+</body>
+</html>

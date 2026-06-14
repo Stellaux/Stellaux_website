@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>API Endpoints — Architecture</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="site-header__inner">
+    <div class="brand">Stellaux<small>· Architecture</small></div>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <a href="external-services.html">External Services</a>
+      <a class="is-active" href="endpoints.html">API Endpoints</a>
+      <a href="endpoints-rest.html">REST Reference</a>
+      <a href="internal-tools.html">Internal Tools</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="observability.html">Observability</a>
+      <a href="scaling.html">Future Scaling</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <header class="page-header">
+    <h1>API Endpoints — Overview</h1>
+    <p class="subtitle">
+      Where REST is used, where GraphQL might be used, and how the
+      documentation is structured.
+    </p>
+  </header>
+
+  <h2>Stance: REST-first, GraphQL only when proven necessary</h2>
+
+  <div class="callout">
+    <p>
+      <strong>Default to REST.</strong> All public, cache-heavy, and stable
+      flows — product catalog, cart, checkout, orders, account, webhooks — are
+      REST endpoints under <code>/api/v1/*</code> served by
+      <code>stellaux_server</code>.
+    </p>
+    <p style="margin-bottom: 0">
+      <strong>GraphQL is not used today.</strong> It will only be considered if
+      a future workload (complex dashboard aggregations, mobile app
+      multiplexing) genuinely benefits from it — and even then it would be
+      additive (a <code>/graphql</code> endpoint that aggregates over existing
+      REST), never a replacement.
+    </p>
+  </div>
+
+  <h2>Where each style lives</h2>
+
+  <table>
+    <thead>
+      <tr><th>Surface</th><th>Style</th><th>Status</th><th>Why</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Public storefront API (<code>/api/v1/*</code>)</td>
+        <td>REST + JSON</td>
+        <td><span class="pill pill--live">Live</span></td>
+        <td>Cacheable at the CDN, easy to consume from the SSR Worker and the browser, predictable shape.</td>
+      </tr>
+      <tr>
+        <td>Webhook receivers</td>
+        <td>REST</td>
+        <td><span class="pill pill--live">Live</span></td>
+        <td>Stripe and Shippo only speak REST; signature is verified on the raw body.</td>
+      </tr>
+      <tr>
+        <td>Admin / internal tooling (Phase 3)</td>
+        <td>REST</td>
+        <td><span class="pill pill--planned">Planned</span></td>
+        <td>Same server, same conventions, lives on the private VPS. See <a href="internal-tools.html">Internal Tools</a>.</td>
+      </tr>
+      <tr>
+        <td>Analytics / dashboard aggregations</td>
+        <td>REST today; <strong>candidate</strong> for GraphQL in a later phase</td>
+        <td><span class="pill pill--planned">Future</span></td>
+        <td>Multiple parallel reads over a single screen would benefit from a single round-trip query.</td>
+      </tr>
+      <tr>
+        <td>Background workers (catalog sync, cron)</td>
+        <td>Internal Rust function calls; REST when crossing process boundaries</td>
+        <td><span class="pill pill--planned">Planned</span></td>
+        <td>No external clients; in-process is simplest. Workers may call admin REST endpoints with a service token.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Documentation policy (per <a href="../API_Guidelines.md">API Guidelines</a>)</h2>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Code-first OpenAPI</h3>
+      <p>
+        Every REST handler is annotated with <code>utoipa</code> attributes
+        directly on the Axum function and on its DTOs (<code>ToSchema</code>,
+        <code>IntoParams</code>). The build fails if annotations are invalid.
+      </p>
+    </div>
+    <div class="card">
+      <h3>Spec is a build artifact</h3>
+      <p>
+        <code>openapi.json</code> is emitted as part of the build (via a build
+        script or a test that writes the file). CI fails on accidental drift
+        against the stored reference.
+      </p>
+    </div>
+    <div class="card">
+      <h3>Interactive docs at <code>/docs</code></h3>
+      <p>
+        <code>utoipa-swagger-ui</code> (or <code>utoipa-redoc</code>) reads the
+        generated spec and renders an interactive page in every environment.
+        The static HTML you're reading is the architectural summary; the
+        runtime page is the contract.
+      </p>
+    </div>
+    <div class="card">
+      <h3>URL path versioning</h3>
+      <p>
+        Routes live under <code>/api/v1/</code>. Breaking changes promote a new
+        version (<code>/api/v2/</code>) and keep the old version alive for at
+        least one deprecation cycle.
+      </p>
+    </div>
+    <div class="card">
+      <h3>Required annotations</h3>
+      <p>
+        Every endpoint must declare: summary, description, request body schema,
+        response status codes (200, 4xx, 500) with examples, security
+        requirements, and parameter descriptions.
+      </p>
+    </div>
+    <div class="card">
+      <h3>GraphQL deferred</h3>
+      <p>
+        If introduced, <code>async-graphql</code> with built-in introspection
+        (GraphiQL / Playground). It would not be documented via OpenAPI.
+      </p>
+    </div>
+  </div>
+
+  <h2>What's documented where</h2>
+
+  <div class="grid">
+    <a class="card-link" href="endpoints-rest.html">
+      <h3>REST Reference →</h3>
+      <p>Every live endpoint grouped by domain (catalog, craft, auth, cart, checkout, account, admin, webhooks). Headers, payloads, parameters, implementation notes.</p>
+    </a>
+    <a class="card-link" href="internal-tools.html">
+      <h3>Internal Tools (Phase 3) →</h3>
+      <p>Endpoints planned for the internal catalog management system. Stays on the private VPS, separate from the public storefront API.</p>
+    </a>
+  </div>
+
+  <h2>Conventions across the REST surface</h2>
+
+  <div class="card">
+    <h3>Base URL</h3>
+    <ul>
+      <li>Dev: <code>http://localhost:8080</code></li>
+      <li>Staging: <code>https://api.staging.example.com</code></li>
+      <li>Production: <code>https://api.example.com</code></li>
+    </ul>
+
+    <h3>Common headers</h3>
+    <table class="param-table">
+      <thead><tr><th>Header</th><th>Required for</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>Authorization: Bearer &lt;jwt&gt;</code></td><td>Protected + admin routes</td><td>HS256 (first-party) or RS256 (Supabase JWKS) — see <a href="external-services.html#supabase">Supabase auth</a>.</td></tr>
+        <tr><td><code>Content-Type: application/json</code></td><td>All <code>POST</code>/<code>PATCH</code></td><td>Webhook routes accept the raw provider body; signature verified before parsing.</td></tr>
+        <tr><td><code>X-Request-Id</code></td><td>Optional, all</td><td>Echoed back; if omitted, server generates a UUIDv4. Used to correlate logs/traces.</td></tr>
+        <tr><td><code>Stripe-Signature</code></td><td>Stripe webhook only</td><td>HMAC over raw body using <code>STRIPE_WEBHOOK_SECRET</code>.</td></tr>
+        <tr><td><code>X-Shippo-Signature</code></td><td>Shippo webhook only</td><td>HMAC-SHA256 with <code>SHIPPO_WEBHOOK_SECRET</code>.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Response shape</h3>
+    <p>JSON on every route. Success responses return the resource directly (no envelope). Errors return:</p>
+    <pre><code>{
+  "error": {
+    "code": "INVENTORY_UNAVAILABLE",
+    "message": "Variant abc-123 has 0 available units",
+    "request_id": "01HVZ7…"
+  }
+}</code></pre>
+    <p>Status codes follow standard HTTP semantics. Validation errors return <code>422</code> with a per-field detail array.</p>
+
+    <h3>Pagination</h3>
+    <p>List endpoints accept <code>?page=1&amp;per_page=20</code> (defaults 1 / 20, max 100) and return:</p>
+    <pre><code>{ "items": [ … ], "page": 1, "per_page": 20, "total": 137 }</code></pre>
+
+    <h3>Idempotency</h3>
+    <p>
+      Webhook handlers are idempotent on <code>(source, external_id)</code> via
+      the <code>webhook_events</code> table. Mutating client endpoints accept
+      an optional <code>Idempotency-Key</code> header — under load this becomes
+      mandatory; see <a href="scaling.html">Future Scaling</a>.
+    </p>
+  </div>
+
+</main>
+
+<footer class="site-footer">
+  <div class="meta">API Endpoints overview · drafted 2026-05-28</div>
+</footer>
+
+</body>
+</html>
