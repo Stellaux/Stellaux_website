@@ -1,4 +1,4 @@
-CREATE TABLE email_tokens (
+CREATE TABLE public.email_tokens (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email           TEXT NOT NULL,
     token           TEXT UNIQUE NOT NULL,
@@ -6,3 +6,4 @@ CREATE TABLE email_tokens (
     used_at         TIMESTAMP NULL,
     created_at      TIMESTAMP DEFAULT NOW()
 );
+ALTER TABLE public.email_tokens ENABLE ROW LEVEL SECURITY;

@@ -1,7 +1,7 @@
-CREATE TABLE orders (
+CREATE TABLE public.orders (
     id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id   UUID NULL REFERENCES users(id) ON DELETE set NULL,
-    guest_profile_id  UUID NULL REFERENCES guest_profiles(id) ON DELETE set NULL,
+    user_id   UUID NULL REFERENCES public.users(id) ON DELETE set NULL,
+    guest_profile_id  UUID NULL REFERENCES public.guest_profiles(id) ON DELETE set NULL,
 
     CONSTRAINT order_owner_check CHECK (
        (user_id IS NOT NULL AND guest_profile_id IS NULL) OR
@@ -32,6 +32,7 @@ CREATE TABLE orders (
 
 );
 
-CREATE INDEX orders_user_id_idx ON orders (user_id);
-CREATE INDEX orders_guest_profile_id_idx ON orders (guest_profile_id);
-CREATE INDEX orders_order_number_idx ON orders (order_number);
+CREATE INDEX orders_user_id_idx ON public.orders (user_id);
+CREATE INDEX orders_guest_profile_id_idx ON public.orders (guest_profile_id);
+CREATE INDEX orders_order_number_idx ON public.orders (order_number);
+ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
