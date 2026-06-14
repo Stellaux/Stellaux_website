@@ -522,7 +522,7 @@ SHIPPO_WEBHOOK_SECRET=...                     # server-only
 
 # Resend
 RESEND_API_KEY=re_...                         # server-only
-RESEND_FROM_EMAIL=orders@themaisonaure.com
+RESEND_FROM_EMAIL=orders@stellaux.com
 
 # Warehouse (origin address for Shippo rates)
 WAREHOUSE_NAME=...
