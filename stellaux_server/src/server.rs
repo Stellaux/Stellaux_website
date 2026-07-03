@@ -37,7 +37,7 @@ use tower_http::{
 
 use crate::common::{
     app_state::AppState,
-    auth::{require_supabase_admin, require_supabase_auth},
+    auth::{require_internal_admin, require_supabase_admin, require_supabase_auth},
     config::StorageBackend,
     error::AppResult,
 };
@@ -133,12 +133,21 @@ fn build_router(state: AppState) -> Router {
         ))
         .layer(RequestBodyLimitLayer::new(body_limit));
 
+    let internal_admin: Router<AppState> = Router::new()
+        .nest("/admin", crate::domains::admin::routes())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_internal_admin,
+        ))
+        .layer(RequestBodyLimitLayer::new(body_limit));
+
     // ── Global middleware (applied to all merged routes) ─────────────────
     Router::new()
         .merge(public)
         .merge(webhooks)
         .merge(protected)
         .merge(admin)
+        .merge(internal_admin)
         .layer(middleware::from_fn_with_state(timeout, request_timeout))
         .layer(
             ServiceBuilder::new()

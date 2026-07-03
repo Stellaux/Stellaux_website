@@ -95,12 +95,53 @@ We use four agent roles in sequence. Each agent has strict permissions.
 
 ---
 
+## 📈 Observability (Non‑negotiable – build it in, never bolt it on)
+
+**Role mindset**: Observability ships *with* the feature, in the same PR. A use case, endpoint, or job is not "done" until its metrics and tracing are in place and visible on `/metrics`. Treat missing metrics as a layer violation: QA fails the change.
+
+### Stack & hosting
+
+- **Metrics**: `metrics` + `axum-prometheus` (already in `Cargo.toml`) – expose a plain‑text `/metrics` endpoint for Prometheus scraping.
+- **Dashboards**: Grafana (internal port `3000`) with a Prometheus data source.
+- **Logging/Tracing**: `tracing` + `tracing-subscriber` (JSON in prod, pretty in dev, controlled by `RUST_LOG`, default `info`).
+- **Hosting**: Prometheus (`9090`) and Grafana (`3000`) run as sidecars on the same VPS / `docker-compose.yml`, bound to `localhost` or the internal network. **Never exposed to the public internet** – operators reach Grafana via SSH tunnel or internal VPN only.
+
+### Where metrics code lives (respect the layering)
+
+| Concern | Location | Notes |
+|---------|----------|-------|
+| Shared Prometheus registry + recorder handle | `src/common/` (e.g. `common::observability`) | Single registry, initialized at startup |
+| HTTP middleware (`axum-prometheus`) + `/metrics` route | `src/common/` wired in `api/` router | Plain‑text endpoint |
+| Metrics **decorators** wrapping repository/provider ports | `src/domains/<context>/infra/` | Decorator pattern – wrap the real `impl`; **never put metric calls in `domain/` or `application/`** |
+| `#[instrument]` tracing spans | `application/` use cases + `infra/` adapters | Keep `domain/` pure (no `tracing` import in `domain/` models) |
+
+### Implementation rules (apply per module/feature)
+
+1. **HTTP layer (Axum)** – middleware records: request counter (labels: `method`, `path`, `status`), request‑duration histogram, in‑flight requests gauge. Expose `/metrics`.
+2. **Core domains** (e.g. `catalog`, `auth`) – for each port implementation (e.g. `ProductRepository::save`), the **infra decorator** records: call counter (labels: `context`, `method`, `result=success|failure`) and a duration histogram. Business logic in `application/`/`domain/` stays metrics‑free.
+3. **Jobs / background work** – per job type record: enqueued, started, completed, failed counters; duration histogram; current queue depth gauge. Use the same registry.
+4. **Database / outbound clients** (SeaORM pool, `reqwest`) – wrap with query/request count + latency; open‑connections gauge where available.
+5. **Prometheus config** – scrape `/metrics` every `15s`; retain `15–30 days`; run as a systemd unit or `docker-compose` service.
+6. **Grafana** – pre‑provision the Prometheus data source (`http://localhost:9090`) and ship a checked‑in dashboard JSON (request rate, error rate, P95 latency, job queue depth, resource usage).
+
+### Fail‑open & toggles (non‑negotiable)
+
+- The backend **must start and serve `/metrics` even if Prometheus/Grafana are down**. Observability never blocks feature delivery or request handling.
+- Honor `DISABLE_METRICS=1` to no‑op the recorder for local dev.
+- Never block a feature on a "fancy" dashboard – but always merge the metric code alongside the feature.
+
+### Acceptance (QA gate)
+
+A reviewer can run the backend locally, hit `/metrics`, and see at least request counters + duration histograms for the implemented endpoints, plus the per‑feature metrics defined for that change, and import the checked‑in Grafana dashboard without manual edits.
+
+---
+
 ## 🔁 Workflow (Every Change)
 
 1. **/plan** – User describes a feature. Architect agent creates a plan.
 2. **User reviews plan** – Approves or requests changes.
-3. **/implement** – Developer agent follows the plan, writes code, runs `cargo check`.
-4. **/qa** – QA agent runs checks. If passes → ready for PR. If fails → Developer fixes.
+3. **/implement** – Developer agent follows the plan, writes code, **wires the metrics decorator + `#[instrument]` immediately (not later)**, runs `cargo check`.
+4. **/qa** – QA agent runs checks **and verifies the feature's metrics appear on `/metrics`**. If passes → ready for PR. If fails → Developer fixes.
 5. **/deploy** (optional) – Deployment agent runs migrations + restarts service.
 
 **For trivial changes** (typo, one‑line fix, renaming): skip planning. But still respect architectural rules.
@@ -154,3 +195,54 @@ the-polished-standard/
    ```bash
    # After changing SQL, regenerate entities
    sea-orm-cli generate entity -o stellaux_server/src/entity
+   ```
+
+---
+
+## 📚 Documentation (write it as you build – never leave it for "later")
+
+**Non‑negotiable**: Documentation ships *with* the change, in the same PR. A feature is not "done" until its plan, any schema changes, and its API surface are documented. QA fails an undocumented change.
+
+### Where documentation lives
+
+| Doc type | Location | Owner |
+|----------|----------|-------|
+| Planning documents | `plans/YYYY-MM-DD-feature-name.md` | Architect |
+| QA reports | `reports/QA-{feature}.md` | QA Agent |
+| Long‑lived reference / ADRs / runbooks | `docs/` | Developer |
+| Canonical DB schema (source of truth) | `shared/models/<NNN_description>.sql` | Developer |
+| API reference (OpenAPI) | **Generated at compile time** from `utoipa` annotations | Developer |
+
+### 1. Planning documents (required for every non‑trivial change)
+
+Before any code, the Architect writes `plans/YYYY-MM-DD-feature-name.md`. It must contain:
+
+- **Context & goal** – what problem, which bounded context (e.g. `auth`, `catalog`).
+- **Files to create/modify** – full paths under `src/domains/<context>/`, grouped by layer (api, application, domain, infra, dto) and any `src/common/` changes.
+- **Proposed schema changes** – see §2 (link or inline the SQL).
+- **Observability plan** – which metrics/spans this feature adds (see the Observability section).
+- **Open questions / risks** – anything needing user approval.
+
+Keep the plan updated if the implementation diverges; the plan is the record of intent, not a throwaway.
+
+### 2. Proposed schema changes (document before you migrate)
+
+Any change touching the database **must be written up in the plan first**, then implemented as SQL:
+
+1. **Describe the change in the plan** – tables/columns added or altered, why, and the backfill/rollback story.
+2. **Author the SQL** in `shared/models/<NNN_description>.sql` (the source of truth) using idempotent statements (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN IF NOT EXISTS`) with both `up` and `down`.
+3. **Regenerate** SeaORM entities (`sea-orm-cli generate entity -o stellaux_server/src/entity`) – never hand‑edit `src/entity/`.
+4. **Record the migration** in `src/migration/` (embeds the SQL). Reference the plan and the `shared/models/` file in the migration's doc comment.
+5. **Never** `DROP TABLE` / `TRUNCATE` (see Prohibited Actions). Destructive changes need an explicit, approved plan entry.
+
+### 3. API & Endpoints (OpenAPI via utoipa)
+
+1. **Always annotate your handlers with macros** (`#[utoipa::path(...)]`) – this generates the OpenAPI spec at compile time. Use the dedicated `utoipa-axum` bindings for router wiring and the separate `utoipa-swagger-ui` crate to serve the interactive UI.
+2. **Annotate DTOs** in `dto/` with `#[derive(ToSchema)]` so request/response bodies appear in the spec.
+3. Every new or changed route under `src/domains/<context>/api/` must update its `#[utoipa::path(...)]` (method, path, params, responses, tags) in the same PR – an endpoint without an annotation is incomplete.
+4. **Acceptance**: a reviewer can build the backend, open the Swagger UI, and see the new/changed endpoint with accurate request/response schemas.
+
+
+
+
+

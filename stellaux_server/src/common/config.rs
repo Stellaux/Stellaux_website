@@ -75,8 +75,9 @@ pub struct DatabaseConfig {
 pub struct AuthConfig {
     pub jwt_secret: String,
     pub jwt_expiry_seconds: i64,
-    pub issuer: String,                    // `iss` baked into our HS256 tokens
-    pub audience: String,                  // `aud` baked into our HS256 tokens
+    pub issuer: String,   // `iss` baked into our HS256 tokens
+    pub audience: String, // `aud` baked into our HS256 tokens
+    pub internal_admin_token: Option<String>,
     pub supabase_jwks_url: Option<String>, // None disables Supabase verification
     pub supabase_audience: String,         // typically "authenticated"
     pub supabase_issuer: Option<String>,   // e.g. https://<proj>.supabase.co/auth/v1
@@ -146,6 +147,9 @@ impl Config {
                 jwt_expiry_seconds: env_parse_or("JWT_EXPIRY_SECONDS", 3600i64)?,
                 issuer: env_or("JWT_ISSUER", "stellaux-api"),
                 audience: env_or("JWT_AUDIENCE", "stellaux-clients"),
+                internal_admin_token: env::var("INTERNAL_ADMIN_TOKEN")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
                 supabase_jwks_url: env::var("SUPABASE_JWKS_URL").ok().filter(|s| !s.is_empty()),
                 supabase_audience: env_or("SUPABASE_AUDIENCE", "authenticated"),
                 supabase_issuer: env::var("SUPABASE_ISSUER").ok().filter(|s| !s.is_empty()),

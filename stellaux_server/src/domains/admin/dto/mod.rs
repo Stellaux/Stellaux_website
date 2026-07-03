@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::common::dto::Pagination;
@@ -27,11 +27,78 @@ pub struct CompatibilityPair {
 
 #[derive(Debug, Deserialize)]
 pub struct UpsertProduct {
-    pub handle: String,
-    pub name: String,
-    pub category: String,
-    pub material: String,
-    pub collection: Option<String>,
-    pub craft_role: Option<String>,
-    pub craft_base_type: Option<String>,
+    #[serde(alias = "handle")]
+    pub slug: String,
+    #[serde(alias = "name")]
+    pub title: String,
+    pub description: Option<String>,
+    #[serde(alias = "category")]
+    pub category_slug: Option<String>,
+    #[serde(alias = "material")]
+    pub default_material: Option<String>,
+    #[serde(alias = "collection")]
+    pub collection_slug: Option<String>,
+    #[serde(default)]
+    pub collection_slugs: Vec<String>,
+    pub active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CancelOrderRequest {
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RefundOrderRequest {
+    pub amount_cents: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct KpiQuery {
+    pub range: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProductSummary {
+    pub id: Uuid,
+    pub slug: String,
+    pub title: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProductVariant {
+    pub id: Uuid,
+    pub sku: String,
+    pub price_cents: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Product {
+    pub id: Uuid,
+    pub slug: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub variants: Vec<ProductVariant>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Order {
+    pub id: Uuid,
+    pub number: String,
+    pub status: String,
+    pub channel: Option<String>,
+    pub total_cents: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrderKpis {
+    pub revenue_cents: i64,
+    pub previous_revenue_cents: i64,
+    pub new_orders: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CountResponse {
+    pub count: u64,
 }

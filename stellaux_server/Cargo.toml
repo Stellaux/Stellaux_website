@@ -71,6 +71,11 @@ serde_json = "1"
 serde_with = "3"
 validator = { version = "0.20", features = ["derive"] }
 
+# ─── API docs / OpenAPI (compile-time spec via utoipa) ─────────────────────
+utoipa = { version = "5", features = ["axum_extras", "macros", "chrono", "uuid"] }
+utoipa-axum = "0.2"
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+
 # ─── Error handling ────────────────────────────────────────────────────────
 thiserror = "2"
 anyhow = "1"

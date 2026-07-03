@@ -39,3 +39,24 @@ impl<T> Page<T> {
         }
     }
 }
+
+#[derive(Debug, Serialize)]
+pub struct ListEnvelope<T> {
+    pub data: Vec<T>,
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+impl<T> ListEnvelope<T> {
+    pub fn from_limit_offset(data: Vec<T>, total: u64, limit: u64, offset: u64) -> Self {
+        let page_size = limit.max(1) as u32;
+        let page = ((offset / limit.max(1)) + 1) as u32;
+        Self {
+            data,
+            total,
+            page,
+            page_size,
+        }
+    }
+}

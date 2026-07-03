@@ -19,10 +19,12 @@
 
 use axum::{
     extract::{FromRequestParts, Request, State},
-    http::{StatusCode, header, request::Parts},
+    http::{HeaderMap, StatusCode, header, request::Parts},
     middleware::Next,
     response::Response,
 };
+use chrono::Utc;
+use uuid::Uuid;
 
 use crate::common::{
     app_state::AppState,
@@ -41,6 +43,8 @@ fn extract_bearer(req: &Request) -> AppResult<&str> {
         .filter(|s| !s.is_empty())
         .ok_or(AppError::Unauthorized)
 }
+
+const HEADER_ORIGINAL_USER: &str = "x-original-user";
 
 // ─── HS256 (internal tokens) ────────────────────────────────────────────────
 
@@ -148,6 +152,48 @@ pub async fn require_supabase_admin(
     Ok(next.run(req).await)
 }
 
+fn service_admin_claims(state: &AppState, token: &str, headers: &HeaderMap) -> AppResult<Claims> {
+    let expected = state
+        .config
+        .auth
+        .internal_admin_token
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or(AppError::Unauthorized)?;
+    if token != expected {
+        return Err(AppError::Unauthorized);
+    }
+
+    let original_user = headers
+        .get(HEADER_ORIGINAL_USER)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(AppError::Unauthorized)?;
+    let sub = Uuid::parse_str(original_user).map_err(|_| AppError::Unauthorized)?;
+    let now = Utc::now().timestamp();
+
+    Ok(Claims {
+        sub,
+        iat: now,
+        exp: now + 300,
+        iss: "internal-admin".to_string(),
+        aud: "stellaux-core-admin".to_string(),
+        role: Role::Admin,
+    })
+}
+
+/// Verify the static service token used by the internal control plane and synthesize
+/// admin claims from the propagated `X-Original-User` header.
+pub async fn require_internal_admin(
+    State(state): State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> AppResult<Response> {
+    let token = extract_bearer(&req)?.to_owned();
+    let claims = service_admin_claims(&state, &token, req.headers())?;
+    req.extensions_mut().insert(claims);
+    Ok(next.run(req).await)
+}
+
 // ─── Handler extractor ──────────────────────────────────────────────────────
 
 /// Pulls the `Claims` previously inserted by any of the auth middlewares.
@@ -207,6 +253,11 @@ impl AuthUser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::config::{
+        AuthConfig, Config, CorsConfig, DatabaseConfig, ResendConfig, ServerConfig, ShippoConfig,
+        StorageBackend, StorageConfig, StripeConfig, WarehouseConfig,
+    };
+    use std::sync::Arc;
     use uuid::Uuid;
 
     fn user(sub: Uuid, role: Role) -> AuthUser {
@@ -218,6 +269,70 @@ mod tests {
             aud: "test".into(),
             role,
         })
+    }
+
+    fn app_state_with_internal_token(token: Option<&str>) -> AppState {
+        let local_path = std::env::temp_dir()
+            .join("stellaux-auth-tests-storage")
+            .display()
+            .to_string();
+        let storage = crate::common::storage::build(&StorageConfig {
+            backend: StorageBackend::Local,
+            public_base_url: String::new(),
+            local_path: local_path.clone(),
+            s3_bucket: None,
+            s3_endpoint: None,
+            s3_region: String::new(),
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+        })
+        .unwrap();
+        AppState {
+            db: sea_orm::DatabaseConnection::Disconnected,
+            config: Arc::new(Config {
+                server: ServerConfig {
+                    host: "127.0.0.1".into(),
+                    port: 8080,
+                    environment: "test".into(),
+                    request_timeout_secs: 30,
+                    body_limit_bytes: 1024,
+                    webhook_body_limit_bytes: 1024,
+                },
+                database: DatabaseConfig {
+                    url: "postgres://example".into(),
+                    pool_size: 1,
+                },
+                auth: AuthConfig {
+                    jwt_secret: "secret".into(),
+                    jwt_expiry_seconds: 3600,
+                    issuer: "issuer".into(),
+                    audience: "aud".into(),
+                    internal_admin_token: token.map(str::to_string),
+                    supabase_jwks_url: None,
+                    supabase_audience: "authenticated".into(),
+                    supabase_issuer: None,
+                    jwks_ttl_seconds: 3600,
+                },
+                cors: CorsConfig { origins: vec![] },
+                storage: StorageConfig {
+                    backend: StorageBackend::Local,
+                    public_base_url: String::new(),
+                    local_path,
+                    s3_bucket: None,
+                    s3_endpoint: None,
+                    s3_region: String::new(),
+                    s3_access_key_id: None,
+                    s3_secret_access_key: None,
+                },
+                stripe: StripeConfig::default(),
+                shippo: ShippoConfig::default(),
+                resend: ResendConfig::default(),
+                warehouse: WarehouseConfig::default(),
+            }),
+            http: reqwest::Client::new(),
+            storage,
+            jwks: None,
+        }
     }
 
     #[test]
@@ -250,5 +365,30 @@ mod tests {
                 "role {role:?} must not bypass ownership"
             );
         }
+    }
+
+    #[test]
+    fn internal_admin_token_mints_admin_claims_for_original_user() {
+        let state = app_state_with_internal_token(Some("svc-token"));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer svc-token".parse().unwrap());
+        headers.insert(
+            HEADER_ORIGINAL_USER,
+            Uuid::nil().to_string().parse().unwrap(),
+        );
+
+        let claims = service_admin_claims(&state, "svc-token", &headers).unwrap();
+        assert_eq!(claims.sub, Uuid::nil());
+        assert_eq!(claims.role, Role::Admin);
+    }
+
+    #[test]
+    fn internal_admin_token_requires_matching_bearer_and_user_header() {
+        let state = app_state_with_internal_token(Some("svc-token"));
+        let headers = HeaderMap::new();
+        assert!(matches!(
+            service_admin_claims(&state, "wrong-token", &headers),
+            Err(AppError::Unauthorized)
+        ));
     }
 }

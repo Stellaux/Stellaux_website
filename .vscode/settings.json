@@ -1,3 +1,4 @@
 {
-    "envWatcher.enabled": false
+    "envWatcher.enabled": false,
+    "liveServer.settings.port": 5501
 }
