@@ -5,9 +5,9 @@
 The backend CI/CD pipeline is split into two GitHub Actions workflows:
 
 - `.github/workflows/backend-ci.yml` runs on pull requests to `main` and on direct pushes to `main`.
-- `.github/workflows/backend-release.yml` runs on pushes to `main`, on `release/**` tags, and on manual dispatches.
+- `.github/workflows/backend-release.yml` runs on pushes to `main`, on `v*` and `release/**` tags, and on manual dispatches.
 
-This keeps fast quality gates on every change while reserving the heavier release build and container validation for the mainline branch.
+This keeps fast quality gates on every change while reserving release builds and server deployment for the mainline branch and explicit release promotion.
 
 ## What Is Enforced Today
 
@@ -51,7 +51,7 @@ It includes:
 
 The release workflow adds the production-oriented build steps that should only happen after code has reached `main`:
 
-- `cargo build --release --bin stellaux_server`
+- `cargo build --locked --release --bin stellaux_server`
 - artifact upload of the release binary
 - Docker multi-stage image build using `docker/build-push-action`
 - Docker layer caching with:
@@ -60,12 +60,68 @@ The release workflow adds the production-oriented build steps that should only h
 
 The server Dockerfile also sets `SQLX_OFFLINE=true` in the builder stage and copies the full crate after dependency cooking so future `.sqlx/` metadata or embedded migrations can be included without giving up dependency-layer caching.
 
+### 5. Fly.io Deployment
+
+The release workflow now deploys `stellaux_server` to Fly.io:
+
+- `main` branch pushes deploy the staging app with `stellaux_server/fly.staging.toml`
+- `v*` tags and manual production dispatches deploy the production app with `stellaux_server/fly.production.toml`
+- both deploy jobs wait on Fly health checks that call `GET /readyz`
+
+This means a deployment is only considered healthy after the backend can connect to Postgres and finish boot-time migrations.
+
 ## Current Design Notes
 
 - The workflows target `stellaux_server/` directly because the repository does not yet have a root Rust workspace.
 - `Swatinem/rust-cache` is enabled to cache Cargo dependencies and the backend `target/` directory.
 - The integration-test job is intentionally separate from the fast PR gate so database-backed tests can grow independently.
-- The release workflow currently validates the production Docker image but does not yet publish or deploy it to a hosting platform.
+- Fly deploys run from the `stellaux_server/` crate directory so the Docker build context matches the backend Dockerfile.
+- The Fly deploy jobs use GitHub Environments (`staging`, `production`) so approval rules and environment-scoped secrets can be applied in GitHub settings.
+- Swagger UI is intentionally a dev-only Cargo feature and is not compiled into the production release path.
+
+## Fly.io Setup
+
+### Required GitHub Environment Secret
+
+Add `FLY_API_TOKEN` to both GitHub Environments:
+
+- `staging`
+- `production`
+
+Using environment-scoped secrets allows different tokens or approval policies per environment.
+
+### Required Fly App Setup
+
+Create the two apps before the workflow can deploy:
+
+- `stellaux-server-staging`
+- `stellaux-server-production`
+
+Then set the backend secrets on each app with `fly secrets set`.
+
+### Minimum Runtime Secrets / Vars
+
+At minimum, each Fly app needs values for:
+
+- `DATABASE_URL`
+- `JWT_SECRET`
+- `CORS_ORIGINS`
+- `SUPABASE_JWKS_URL`
+- `SUPABASE_ISSUER`
+
+Depending on the features enabled in that environment, also set:
+
+- `INTERNAL_ADMIN_TOKEN`
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
+- `STRIPE_SUCCESS_URL`
+- `STRIPE_CANCEL_URL`
+- `SHIPPO_API_TOKEN`
+- `SHIPPO_WEBHOOK_SECRET`
+- `RESEND_API_KEY`
+- `RESEND_FROM_EMAIL`
+- warehouse address fields
+- storage settings (`STORAGE_BACKEND`, `STORAGE_PUBLIC_URL`, and S3/R2-compatible credentials)
 
 ## Future Improvements
 
@@ -82,22 +138,22 @@ This is currently deferred because the repository does not yet ship SQLx offline
 
 ### 2. Database Migrations in CI
 
-Before production rollout, add a real migration strategy that CI can execute against the temporary PostgreSQL container.
+The backend already applies embedded SeaORM migrations on boot via `Migrator::up(&db, None)`. The next CI improvement is to exercise that same boot path inside integration tests.
 
 Recommended next step:
 
-- wire up a proper migration crate or embedded migration runner
-- apply migrations before integration tests
+- centralize test setup around the embedded migrator
+- apply migrations before integration tests using the same runtime path as production
 - keep schema changes backward-compatible for rolling deploys
 
-The existing `migration/` crate is still only a placeholder and is not yet part of the backend startup or CI path.
+See `docs/INTEGRATION_COVERAGE_PLAN.md` for the next expansion steps.
 
 ### 3. Staging and Production Environments
 
-Introduce two isolated deployment targets:
+Maintain two isolated deployment targets:
 
 - `staging`: auto-deploy on every push to `main`
-- `production`: deploy only from a manual approval step or a pushed `release/**` tag
+- `production`: deploy only from a manual approval step or a pushed release tag
 
 Each environment should have:
 
@@ -108,14 +164,7 @@ Each environment should have:
 
 ### 4. Zero-Downtime Hosting
 
-Once a hosting platform is selected, extend the release workflow to deploy only after the new revision is healthy.
-
-Recommended platforms for this backend:
-
-- Fly.io
-- Railway
-
-The deployment job should wait for health checks to pass and only then mark the rollout successful.
+Fly.io is now wired as the default server host. Keep the deploy jobs waiting on readiness checks and scale production to at least two machines once the storage and database topology are ready for it.
 
 ### 5. Branch Protection
 

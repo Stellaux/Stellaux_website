@@ -6,3 +6,5 @@ Cargo.lock.bak
 
 # macOS
 .DS_Store
+.env
+
