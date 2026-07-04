@@ -40,7 +40,20 @@ pub struct UpsertProduct {
     pub collection_slug: Option<String>,
     #[serde(default)]
     pub collection_slugs: Vec<String>,
+    pub status: Option<String>,
     pub active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertProductVariant {
+    pub material: String,
+    pub design: Option<String>,
+    pub type_label: Option<String>,
+    pub size_value: Option<f64>,
+    pub sku: String,
+    pub price_cents: i64,
+    pub cost_cents: Option<i64>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

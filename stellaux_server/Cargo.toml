@@ -3,6 +3,12 @@ name = "stellaux_server"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+# Interactive Swagger assets are intentionally dev-only. Production and CI
+# builds must not depend on downloading them.
+swagger-ui = ["dep:utoipa-swagger-ui"]
+
 [dependencies]
 # ─── Web framework + async runtime ─────────────────────────────────────────
 axum = { version = "0.8", features = ["macros", "http2", "tokio"] }
@@ -74,7 +80,7 @@ validator = { version = "0.20", features = ["derive"] }
 # ─── API docs / OpenAPI (compile-time spec via utoipa) ─────────────────────
 utoipa = { version = "5", features = ["axum_extras", "macros", "chrono", "uuid"] }
 utoipa-axum = "0.2"
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"], optional = true }
 
 # ─── Error handling ────────────────────────────────────────────────────────
 thiserror = "2"

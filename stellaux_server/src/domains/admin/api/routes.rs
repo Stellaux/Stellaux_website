@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use sea_orm::{
@@ -22,7 +22,7 @@ use crate::{
     domains::admin::dto::{
         CancelOrderRequest, CompatibilityPair, CountResponse, InventoryAdjust, KpiQuery, Order,
         OrderKpis, OrdersFilter, Product, ProductSummary, ProductVariant, RefundOrderRequest,
-        UpsertProduct,
+        UpsertProduct, UpsertProductVariant,
     },
 };
 
@@ -44,6 +44,8 @@ pub fn routes() -> Router<AppState> {
                 .patch(update_product)
                 .delete(delete_product),
         )
+        .route("/products/{product_id}/variants", post(create_variant))
+        .route("/variants/{variant_id}", patch(update_variant))
         .route("/inventory", get(list_inventory).post(adjust_inventory))
         .route("/inventory/adjustments", post(adjust_inventory))
         .route(
@@ -440,6 +442,31 @@ async fn update_product(
     Ok(Json(product))
 }
 
+async fn create_variant(
+    _admin: AuthUser,
+    State(state): State<AppState>,
+    Path(product_id): Path<Uuid>,
+    Json(body): Json<UpsertProductVariant>,
+) -> AppResult<Json<ProductVariant>> {
+    let txn = state.db.begin().await?;
+    let variant = upsert_variant_record(&txn, None, product_id, body).await?;
+    txn.commit().await?;
+    Ok(Json(variant))
+}
+
+async fn update_variant(
+    _admin: AuthUser,
+    State(state): State<AppState>,
+    Path(variant_id): Path<Uuid>,
+    Json(body): Json<UpsertProductVariant>,
+) -> AppResult<Json<ProductVariant>> {
+    let txn = state.db.begin().await?;
+    let product_id = find_variant_product_id(&txn, variant_id).await?;
+    let variant = upsert_variant_record(&txn, Some(variant_id), product_id, body).await?;
+    txn.commit().await?;
+    Ok(Json(variant))
+}
+
 async fn delete_product(
     _admin: AuthUser,
     State(state): State<AppState>,
@@ -740,6 +767,7 @@ async fn upsert_product_record(
     body: UpsertProduct,
 ) -> AppResult<Product> {
     let collection_slugs = normalized_collection_slugs(&body);
+    let requested_status = requested_product_status(&body)?;
     let product_id = if let Some(product_id) = target_id {
         let category_id = match body.category_slug.as_deref() {
             Some(slug) => Some(resolve_category_id(txn, slug).await?),
@@ -764,7 +792,7 @@ async fn upsert_product_record(
                 body.description.clone().into(),
                 category_id.into(),
                 body.default_material.clone().into(),
-                body.active.map(active_to_status).into(),
+                requested_status.clone().into(),
                 product_id.into(),
             ],
         ))
@@ -798,8 +826,8 @@ async fn upsert_product_record(
                 body.description.clone().into(),
                 category_id.into(),
                 body.default_material.clone().into(),
-                body.active
-                    .map(active_to_status)
+                requested_status
+                    .as_deref()
                     .unwrap_or("draft")
                     .to_string()
                     .into(),
@@ -849,6 +877,117 @@ async fn upsert_product_record(
     load_product(txn, product_id).await
 }
 
+async fn upsert_variant_record(
+    txn: &DatabaseTransaction,
+    target_id: Option<Uuid>,
+    product_id: Uuid,
+    body: UpsertProductVariant,
+) -> AppResult<ProductVariant> {
+    let material = body.material.trim().to_string();
+    let sku = body.sku.trim().to_string();
+    if material.is_empty() {
+        return Err(AppError::BadRequest(
+            "variant.material is required".to_string(),
+        ));
+    }
+    if sku.is_empty() {
+        return Err(AppError::BadRequest("variant.sku is required".to_string()));
+    }
+    if body.price_cents < 0 {
+        return Err(AppError::BadRequest(
+            "variant.price_cents must be zero or greater".to_string(),
+        ));
+    }
+    if body.cost_cents.is_some_and(|cost| cost < 0) {
+        return Err(AppError::BadRequest(
+            "variant.cost_cents must be zero or greater".to_string(),
+        ));
+    }
+    let status = normalized_catalog_status(body.status.as_deref(), "variant.status")?;
+    let type_label = body
+        .type_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Default")
+        .to_string();
+    let variant_id = if let Some(variant_id) = target_id {
+        let updated = txn
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                r#"
+                    update public.product_variants
+                       set material = $1,
+                           design = $2,
+                           type_label = $3,
+                           size_value = $4,
+                           sku = $5,
+                           price_cents = $6,
+                           cost_cents = $7,
+                           status = coalesce($8, status),
+                           updated_at = now()
+                     where id = $9
+                "#,
+                vec![
+                    material.clone().into(),
+                    body.design.clone().into(),
+                    type_label.clone().into(),
+                    body.size_value.into(),
+                    sku.clone().into(),
+                    body.price_cents.into(),
+                    body.cost_cents.into(),
+                    status.clone().into(),
+                    variant_id.into(),
+                ],
+            ))
+            .await?;
+        if updated.rows_affected() == 0 {
+            return Err(AppError::NotFound);
+        }
+        variant_id
+    } else {
+        let row = ProductVariantRow::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+                insert into public.product_variants (
+                    product_id,
+                    material,
+                    design,
+                    type_label,
+                    size_value,
+                    sku,
+                    price_cents,
+                    cost_cents,
+                    status
+                )
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                returning id, sku, price_cents
+            "#,
+            vec![
+                product_id.into(),
+                material.clone().into(),
+                body.design.clone().into(),
+                type_label.into(),
+                body.size_value.into(),
+                sku.clone().into(),
+                body.price_cents.into(),
+                body.cost_cents.into(),
+                status.unwrap_or_else(|| "draft".to_string()).into(),
+            ],
+        ))
+        .one(txn)
+        .await?
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("variant insert returned no row")))?;
+        return Ok(ProductVariant {
+            id: row.id,
+            sku: row.sku,
+            price_cents: row.price_cents,
+        });
+    };
+
+    load_variant(txn, variant_id).await
+}
+
 async fn resolve_category_id<C>(db: &C, slug: &str) -> AppResult<Uuid>
 where
     C: ConnectionTrait,
@@ -896,8 +1035,67 @@ fn normalized_collection_slugs(body: &UpsertProduct) -> Vec<String> {
     slugs
 }
 
+fn requested_product_status(body: &UpsertProduct) -> AppResult<Option<String>> {
+    if let Some(status) = body.status.as_deref() {
+        return normalized_catalog_status(Some(status), "product.status");
+    }
+    Ok(body.active.map(active_to_status).map(str::to_string))
+}
+
+fn normalized_catalog_status(status: Option<&str>, field: &str) -> AppResult<Option<String>> {
+    match status.map(str::trim).filter(|status| !status.is_empty()) {
+        Some(value @ ("draft" | "active" | "archived")) => Ok(Some(value.to_string())),
+        Some(other) => Err(AppError::BadRequest(format!(
+            "{field} must be one of: draft, active, archived (got {other})"
+        ))),
+        None => Ok(None),
+    }
+}
+
 fn active_to_status(active: bool) -> &'static str {
     if active { "active" } else { "draft" }
+}
+
+async fn load_variant<C>(db: &C, variant_id: Uuid) -> AppResult<ProductVariant>
+where
+    C: ConnectionTrait,
+{
+    let variant = ProductVariantRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+            select
+                id,
+                sku,
+                price_cents
+            from public.product_variants
+            where id = $1
+        "#,
+        vec![variant_id.into()],
+    ))
+    .one(db)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    Ok(ProductVariant {
+        id: variant.id,
+        sku: variant.sku,
+        price_cents: variant.price_cents,
+    })
+}
+
+async fn find_variant_product_id<C>(db: &C, variant_id: Uuid) -> AppResult<Uuid>
+where
+    C: ConnectionTrait,
+{
+    ProductIdentityRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "select product_id as id from public.product_variants where id = $1",
+        vec![variant_id.into()],
+    ))
+    .one(db)
+    .await?
+    .map(|row| row.id)
+    .ok_or(AppError::NotFound)
 }
 
 struct KpiWindow {
@@ -953,6 +1151,7 @@ mod tests {
             default_material: Some("stoneware".into()),
             collection_slug: Some("summer-drop".into()),
             collection_slugs: vec!["summer-drop".into(), "atelier".into()],
+            status: None,
             active: Some(true),
         });
 
@@ -960,5 +1159,29 @@ mod tests {
             slugs,
             vec!["summer-drop".to_string(), "atelier".to_string()]
         );
+    }
+
+    #[test]
+    fn requested_product_status_prefers_explicit_status_over_legacy_active_flag() {
+        let status = requested_product_status(&UpsertProduct {
+            slug: "mug".into(),
+            title: "Stone Mug".into(),
+            description: None,
+            category_slug: Some("drinkware".into()),
+            default_material: Some("stoneware".into()),
+            collection_slug: None,
+            collection_slugs: Vec::new(),
+            status: Some("archived".into()),
+            active: Some(true),
+        })
+        .unwrap();
+
+        assert_eq!(status.as_deref(), Some("archived"));
+    }
+
+    #[test]
+    fn normalized_catalog_status_rejects_unknown_value() {
+        let err = normalized_catalog_status(Some("retired"), "product.status").unwrap_err();
+        assert!(err.to_string().contains("draft, active, archived"));
     }
 }

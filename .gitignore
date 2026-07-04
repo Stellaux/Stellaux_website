@@ -8,3 +8,5 @@ Cargo.lock.bak
 .DS_Store
 .env
 
+supabase/.temp/*
+stellaux_server/Cargo.lock

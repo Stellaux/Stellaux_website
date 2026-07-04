@@ -21,6 +21,8 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 
 # No system deps needed — pure-Rust crypto/db/http stack.
+# Swagger UI is an optional dev-only Cargo feature, so production builds do not
+# compile the asset-downloading crate.
 ENV SQLX_OFFLINE=true
 
 # Cache the dependency build. Reused whenever Cargo.toml is unchanged.
@@ -31,7 +33,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 # `.sqlx/` metadata or embedded migrations are available to the release build
 # without busting the cached dependency layer on every code change.
 COPY . .
-RUN cargo build --release --bin stellaux_server
+RUN cargo build --locked --release --bin stellaux_server
 
 # ─── Stage 4: runtime ────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime

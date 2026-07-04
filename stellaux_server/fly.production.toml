@@ -1,0 +1,45 @@
+# Fly.io production deployment for `stellaux_server`.
+#
+# Deploy from the crate root so the Docker build context matches the Dockerfile:
+#     cd stellaux_server
+#     fly deploy --remote-only --config fly.production.toml
+#
+# The GitHub Actions workflow promotes production from a release tag or manual dispatch.
+#
+# Before first deploy:
+#   1. Create the app if needed: `fly apps create stellaux-server-production`
+#   2. Set production secrets with `fly secrets set --app stellaux-server-production ...`
+#   3. Point secrets at production-only infrastructure.
+#
+# Storage note:
+#   For production, prefer `STORAGE_BACKEND=s3` (or R2/MinIO-compatible settings)
+#   via Fly secrets/vars so uploaded media is not tied to a single machine's disk.
+
+app = "stellaux-server-production"
+primary_region = "iad"
+
+[build]
+
+[env]
+  APP_ENV = "production"
+  SERVER_HOST = "0.0.0.0"
+  SERVER_PORT = "8080"
+  RUST_LOG = "info,stellaux_server=info"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/readyz"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "30s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
