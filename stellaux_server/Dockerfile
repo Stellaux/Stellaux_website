@@ -50,6 +50,15 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/stellaux_server /usr/local/bin/stellaux_server
 
+# The Local storage backend (STORAGE_BACKEND=local, the default) creates and
+# writes ./storage relative to WORKDIR. WORKDIR is root-owned, so pre-create the
+# dir owned by the unprivileged `app` user before dropping privileges — otherwise
+# boot fails with "creating local storage dir ./storage: Permission denied".
+# NOTE: this dir is ephemeral (lost on redeploy/restart). For durable media,
+# set STORAGE_BACKEND=s3 (+ S3 secrets) or mount a Fly volume and point
+# STORAGE_LOCAL_PATH at it.
+RUN mkdir -p /app/storage && chown app:app /app/storage
+
 USER app
 EXPOSE 8080
 
