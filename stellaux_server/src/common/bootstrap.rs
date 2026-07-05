@@ -14,15 +14,12 @@ use anyhow::Context;
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use sea_orm_migration::MigratorTrait;
-
 use crate::common::{
     app_state::AppState,
     config::{Config, DatabaseConfig},
     jwt::JwksCache,
     storage,
 };
-use crate::migration::Migrator;
 
 pub async fn init() -> anyhow::Result<AppState> {
     init_tracing();
@@ -36,13 +33,13 @@ pub async fn init() -> anyhow::Result<AppState> {
         .await
         .context("connecting to database")?;
 
-    // Apply any pending sea-orm migrations before the server accepts traffic.
-    // sea-orm-migration tracks state in `seaql_migrations`, so this is a no-op
-    // when nothing is pending.
-    Migrator::up(&db, None)
-        .await
-        .context("applying database migrations")?;
-    tracing::info!("migrations up-to-date");
+    // Schema ownership: the Supabase SQL migrations (`supabase/migrations/`, applied out-of-band via
+    // `supabase db push`, split across stellaux_server and the internal dashboard) are the single
+    // source of truth. The original sea-orm migrator (`src/migration/`) was abandoned in that switch
+    // and is intentionally NOT run at boot: its schema diverged (old `craft_role` catalog model) and
+    // would collide with the live schema. The server reads via raw SQL against the authoritative
+    // tables (see `domains/*/api/routes.rs`); it does not depend on the sea-orm entities/migrator.
+    tracing::info!("skipping sea-orm migrator; schema owned by Supabase migrations");
 
     let http = build_http_client().context("building http client")?;
 

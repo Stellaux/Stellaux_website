@@ -6,5 +6,4 @@
 pub mod common;
 pub mod domains;
 pub mod entity;
-pub mod migration;
 pub mod server;

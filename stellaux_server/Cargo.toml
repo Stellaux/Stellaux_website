@@ -49,12 +49,6 @@ sea-orm = { version = "1.1", default-features = false, features = [
   "with-json",
   "debug-print",
 ] }
-sea-orm-migration = { version = "1.1", default-features = false, features = [
-  "runtime-tokio-rustls",
-  "sqlx-postgres",
-  "with-chrono",
-  "with-uuid",
-] }
 
 # ─── Auth & crypto (all pure-Rust: ring, RustCrypto) ──────────────────────
 jsonwebtoken = "9"
