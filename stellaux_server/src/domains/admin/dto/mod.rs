@@ -1,4 +1,6 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::common::dto::Pagination;
@@ -102,6 +104,63 @@ pub struct Order {
     pub status: String,
     pub channel: Option<String>,
     pub total_cents: i64,
+}
+
+/// Admin orders-table row. **Unified with `internal_api::shared::domain::OrderListItem`** — keep the
+/// field set (names + types) identical on both sides so the ICP can deserialize this verbatim.
+/// `channel` has no column yet (always `None`); everything else is DB truth.
+#[derive(Debug, Serialize)]
+pub struct OrderListItem {
+    pub id: Uuid,
+    pub number: String,
+    pub status: String,
+    pub customer: Option<String>,
+    pub email: Option<String>,
+    pub channel: Option<String>,
+    pub total_cents: i64,
+    pub item_count: i64,
+    pub placed_at: Option<DateTime<Utc>>,
+    pub ship_city: Option<String>,
+    pub ship_country: Option<String>,
+}
+
+/// One line of an order (`public.order_items`). Unified with the ICP `OrderLineItem`.
+#[derive(Debug, Serialize)]
+pub struct OrderLineItem {
+    pub id: Uuid,
+    pub sku: String,
+    pub name: String,
+    pub quantity: i32,
+    pub unit_price_cents: i64,
+    pub total_cents: i64,
+}
+
+/// Full order detail (list fields + money breakdown, addresses, timestamps, line items).
+/// **Unified with `internal_api::shared::domain::OrderDetail`.** Superset of `OrderListItem`, so a
+/// consumer expecting the list shape can read a detail payload unchanged.
+#[derive(Debug, Serialize)]
+pub struct OrderDetail {
+    pub id: Uuid,
+    pub number: String,
+    pub status: String,
+    pub customer: Option<String>,
+    pub email: Option<String>,
+    pub channel: Option<String>,
+    pub total_cents: i64,
+    pub item_count: i64,
+    pub placed_at: Option<DateTime<Utc>>,
+    pub ship_city: Option<String>,
+    pub ship_country: Option<String>,
+    pub subtotal_cents: i64,
+    pub tax_cents: i64,
+    pub shipping_cents: i64,
+    pub currency: String,
+    pub user_id: Option<Uuid>,
+    pub paid_at: Option<DateTime<Utc>>,
+    pub shipped_at: Option<DateTime<Utc>>,
+    pub shipping_address: Value,
+    pub billing_address: Value,
+    pub line_items: Vec<OrderLineItem>,
 }
 
 #[derive(Debug, Serialize)]

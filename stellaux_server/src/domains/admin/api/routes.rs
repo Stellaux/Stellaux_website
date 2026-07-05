@@ -20,9 +20,9 @@ use crate::{
         error::{AppError, AppResult},
     },
     domains::admin::dto::{
-        CancelOrderRequest, CompatibilityPair, CountResponse, InventoryAdjust, KpiQuery, Order,
-        OrderKpis, OrdersFilter, Product, ProductSummary, ProductVariant, RefundOrderRequest,
-        UpsertProduct, UpsertProductVariant,
+        CancelOrderRequest, CompatibilityPair, CountResponse, InventoryAdjust, KpiQuery,
+        OrderDetail, OrderKpis, OrderLineItem, OrderListItem, OrdersFilter, Product, ProductSummary,
+        ProductVariant, RefundOrderRequest, UpsertProduct, UpsertProductVariant,
     },
 };
 
@@ -115,6 +115,52 @@ struct OrderRow {
 }
 
 #[derive(Debug, FromQueryResult)]
+struct OrderListRow {
+    id: Uuid,
+    number: String,
+    status: String,
+    customer: Option<String>,
+    email: Option<String>,
+    total_cents: i64,
+    item_count: i64,
+    placed_at: Option<DateTime<Utc>>,
+    ship_city: Option<String>,
+    ship_country: Option<String>,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct OrderDetailRow {
+    id: Uuid,
+    number: String,
+    status: String,
+    customer: Option<String>,
+    email: Option<String>,
+    total_cents: i64,
+    subtotal_cents: i64,
+    tax_cents: i64,
+    shipping_cents: i64,
+    currency: String,
+    user_id: Option<Uuid>,
+    placed_at: Option<DateTime<Utc>>,
+    paid_at: Option<DateTime<Utc>>,
+    shipped_at: Option<DateTime<Utc>>,
+    shipping_address: serde_json::Value,
+    billing_address: serde_json::Value,
+    ship_city: Option<String>,
+    ship_country: Option<String>,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct OrderItemRow {
+    id: Uuid,
+    sku: String,
+    name: String,
+    quantity: i32,
+    unit_price_cents: i64,
+    total_cents: i64,
+}
+
+#[derive(Debug, FromQueryResult)]
 struct InventoryLevelRow {
     variant_id: Uuid,
     quantity: i32,
@@ -173,19 +219,30 @@ async fn list_orders(
     _admin: AuthUser,
     State(state): State<AppState>,
     Query(filter): Query<OrdersFilter>,
-) -> AppResult<Json<ListEnvelope<Order>>> {
+) -> AppResult<Json<ListEnvelope<OrderListItem>>> {
     let (limit, offset) = filter.page.clamped();
-    let rows = OrderRow::find_by_statement(Statement::from_sql_and_values(
+    let rows = OrderListRow::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"
             select
-                id,
-                order_number as number,
-                status,
-                total_cents
-            from public.orders
-            where ($1::text is null or status = $1)
-            order by placed_at desc, created_at desc
+                o.id,
+                o.order_number as number,
+                o.status,
+                coalesce(u.full_name, g.email) as customer,
+                coalesce(u.email, g.email) as email,
+                o.total_cents,
+                coalesce(
+                    (select sum(oi.quantity) from public.order_items oi where oi.order_id = o.id),
+                    0
+                )::bigint as item_count,
+                o.placed_at,
+                o.shipping_address->>'city' as ship_city,
+                o.shipping_address->>'country' as ship_country
+            from public.orders o
+            left join public.users u on u.id = o.user_id
+            left join public.guest_profiles g on g.id = o.guest_profile_id
+            where ($1::text is null or o.status = $1)
+            order by o.placed_at desc nulls last, o.created_at desc
             limit $2 offset $3
         "#,
         vec![
@@ -211,7 +268,7 @@ async fn list_orders(
     .unwrap_or(0);
 
     Ok(Json(ListEnvelope::from_limit_offset(
-        rows.into_iter().map(map_order_row).collect(),
+        rows.into_iter().map(map_order_list_row).collect(),
         total,
         limit,
         offset,
@@ -259,24 +316,54 @@ async fn get_order(
     _admin: AuthUser,
     State(state): State<AppState>,
     Path(order_id): Path<Uuid>,
-) -> AppResult<Json<Order>> {
-    let row = OrderRow::find_by_statement(Statement::from_sql_and_values(
+) -> AppResult<Json<OrderDetail>> {
+    let row = OrderDetailRow::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"
             select
-                id,
-                order_number as number,
-                status,
-                total_cents
-            from public.orders
-            where id = $1
+                o.id,
+                o.order_number as number,
+                o.status,
+                coalesce(u.full_name, g.email) as customer,
+                coalesce(u.email, g.email) as email,
+                o.total_cents,
+                o.subtotal_cents,
+                o.tax_cents,
+                o.shipping_cents,
+                o.currency,
+                o.user_id,
+                o.placed_at,
+                o.paid_at,
+                o.shipped_at,
+                o.shipping_address,
+                o.billing_address,
+                o.shipping_address->>'city' as ship_city,
+                o.shipping_address->>'country' as ship_country
+            from public.orders o
+            left join public.users u on u.id = o.user_id
+            left join public.guest_profiles g on g.id = o.guest_profile_id
+            where o.id = $1
         "#,
         vec![order_id.into()],
     ))
     .one(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
-    Ok(Json(map_order_row(row)))
+
+    let items = OrderItemRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+            select id, sku, name, quantity, unit_price_cents, total_cents
+            from public.order_items
+            where order_id = $1
+            order by name asc
+        "#,
+        vec![order_id.into()],
+    ))
+    .all(&state.db)
+    .await?;
+
+    Ok(Json(map_order_detail(row, items)))
 }
 
 async fn refund_order(
@@ -673,13 +760,58 @@ async fn channel_listing_error_count(
     Ok(Json(CountResponse { count }))
 }
 
-fn map_order_row(row: OrderRow) -> Order {
-    Order {
+fn map_order_list_row(row: OrderListRow) -> OrderListItem {
+    OrderListItem {
         id: row.id,
         number: row.number,
         status: row.status,
+        customer: row.customer,
+        email: row.email,
+        // No channel column yet — orders don't record their sales channel. Always `None`.
         channel: None,
         total_cents: row.total_cents,
+        item_count: row.item_count,
+        placed_at: row.placed_at,
+        ship_city: row.ship_city,
+        ship_country: row.ship_country,
+    }
+}
+
+fn map_order_detail(row: OrderDetailRow, items: Vec<OrderItemRow>) -> OrderDetail {
+    let line_items: Vec<OrderLineItem> = items
+        .into_iter()
+        .map(|it| OrderLineItem {
+            id: it.id,
+            sku: it.sku,
+            name: it.name,
+            quantity: it.quantity,
+            unit_price_cents: it.unit_price_cents,
+            total_cents: it.total_cents,
+        })
+        .collect();
+    let item_count = line_items.iter().map(|it| it.quantity as i64).sum();
+    OrderDetail {
+        id: row.id,
+        number: row.number,
+        status: row.status,
+        customer: row.customer,
+        email: row.email,
+        channel: None,
+        total_cents: row.total_cents,
+        item_count,
+        placed_at: row.placed_at,
+        ship_city: row.ship_city,
+        ship_country: row.ship_country,
+        subtotal_cents: row.subtotal_cents,
+        tax_cents: row.tax_cents,
+        shipping_cents: row.shipping_cents,
+        currency: row.currency,
+        user_id: row.user_id,
+        paid_at: row.paid_at,
+        shipped_at: row.shipped_at,
+        shipping_address: row.shipping_address,
+        billing_address: row.billing_address,
+        line_items,
     }
 }
 

@@ -9,16 +9,28 @@
 //!
 //! Stored object keys are environment-agnostic — only the prefix differs
 //! across deploys. Always store the *key* in the DB (e.g.,
-//! `images/products/meridien-signet/main.jpg`) and call `Storage::public_url`
-//! when serializing it for clients.
+//! `images/products/meridien-signet/main.jpg`).
+//!
+//! Serializing a key for a client depends on whether the object is public:
+//!   - Public objects (catalog stock photography behind a CDN) → `public_url`.
+//!   - Private objects (`order-media`: photos of a customer's own piece) →
+//!     `signed_url`, which mints a short-lived presigned GET so the bucket can
+//!     stay closed. On the `local` backend there is nothing to sign, so
+//!     `signed_url` falls back to the `public_url` served by the `ServeDir`
+//!     mount (dev/test only).
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
 use bytes::Bytes;
 use object_store::{
-    ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem, path::Path as ObjectPath,
+    ObjectStore,
+    aws::{AmazonS3, AmazonS3Builder},
+    local::LocalFileSystem,
+    path::Path as ObjectPath,
+    signer::Signer,
 };
+use reqwest::Method;
 
 use crate::common::{
     config::{StorageBackend, StorageConfig},
@@ -28,6 +40,10 @@ use crate::common::{
 #[derive(Clone)]
 pub struct Storage {
     inner: Arc<dyn ObjectStore>,
+    /// Concrete S3 handle kept alongside `inner` because presigning lives on the
+    /// `Signer` trait, which is not object-safe on `dyn ObjectStore`. `None` for
+    /// the local backend (nothing to presign).
+    signer: Option<Arc<AmazonS3>>,
     public_base_url: String,
     backend: StorageBackend,
 }
@@ -65,13 +81,39 @@ impl Storage {
         Ok(())
     }
 
-    /// Construct the externally-visible URL for an object key.
+    /// Construct the externally-visible URL for a *public* object key.
     pub fn public_url(&self, key: &str) -> String {
         format!(
             "{}/{}",
             self.public_base_url.trim_end_matches('/'),
             key.trim_start_matches('/')
         )
+    }
+
+    /// Mint a short-lived presigned GET URL for a *private* object key.
+    ///
+    /// Use this for anything in a closed bucket (e.g. `order-media`) after the
+    /// caller has passed its ownership guard: the returned URL grants read access
+    /// to this one object for `expires_in`, so it can be handed to a browser
+    /// without exposing bucket credentials.
+    ///
+    /// On the local backend there are no credentials to sign with; the object is
+    /// already reachable via the `ServeDir` mount, so this returns `public_url`.
+    /// That path is for dev/test only — do not rely on it to keep anything private.
+    pub async fn signed_url(&self, key: &str, expires_in: Duration) -> AppResult<String> {
+        match &self.signer {
+            Some(s3) => {
+                let path = ObjectPath::from(key);
+                let url = s3
+                    .signed_url(Method::GET, &path, expires_in)
+                    .await
+                    .map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("signing url for {key}: {e}"))
+                    })?;
+                Ok(url.to_string())
+            }
+            None => Ok(self.public_url(key)),
+        }
     }
 
     pub fn backend(&self) -> StorageBackend {
@@ -89,6 +131,7 @@ pub fn build(config: &StorageConfig) -> anyhow::Result<Storage> {
                 .context("opening local filesystem backend")?;
             Ok(Storage {
                 inner: Arc::new(store),
+                signer: None,
                 public_base_url: config.public_base_url.clone(),
                 backend: StorageBackend::Local,
             })
@@ -113,16 +156,25 @@ pub fn build(config: &StorageConfig) -> anyhow::Result<Storage> {
                 .with_access_key_id(access_key)
                 .with_secret_access_key(secret_key);
 
-            // Custom endpoint = R2 / MinIO / Backblaze. AWS S3 leaves this unset.
+            // Custom endpoint = R2 / MinIO / Backblaze / Supabase Storage. AWS S3
+            // leaves this unset. These all require path-style addressing
+            // (`{endpoint}/{bucket}/{key}`) rather than virtual-hosted
+            // (`{bucket}.{endpoint}/...`) — Supabase Storage only supports path
+            // style. object_store already defaults to path style, but pin it so a
+            // future default flip can't silently break these backends.
             if let Some(endpoint) = &config.s3_endpoint {
                 builder = builder
                     .with_endpoint(endpoint)
+                    .with_virtual_hosted_style_request(false)
                     .with_allow_http(endpoint.starts_with("http://"));
             }
 
-            let store = builder.build().context("building S3 client")?;
+            // Keep the concrete `AmazonS3` in an Arc so it backs both the generic
+            // `ObjectStore` API (`inner`) and presigning (`signer`).
+            let store = Arc::new(builder.build().context("building S3 client")?);
             Ok(Storage {
-                inner: Arc::new(store),
+                inner: store.clone(),
+                signer: Some(store),
                 public_base_url: config.public_base_url.clone(),
                 backend: StorageBackend::S3,
             })
